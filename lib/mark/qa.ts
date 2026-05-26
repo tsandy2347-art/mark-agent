@@ -12,7 +12,7 @@
 
 import { prisma } from "../prisma";
 import { brisbane } from "../time";
-import { answerQuestion, type QaHistoryTurn, type QaPdf } from "../anthropic";
+import { answerQuestion, type QaAttachment, type QaHistoryTurn } from "../anthropic";
 import { readLatestMetrics } from "./goals";
 
 interface AskInput {
@@ -22,10 +22,11 @@ interface AskInput {
    *  Defaults to false. The route layer is responsible for setting this only
    *  when the requesting user is in MARK_RESTRICTED_USERNAMES. */
   includeRestricted?: boolean;
-  /** Optional PDFs the user uploaded. Forwarded straight through to Anthropic
-   *  as `document` content blocks. Attached to the first user message of the
-   *  conversation so they persist across follow-up turns. */
-  pdfs?: QaPdf[];
+  /** Optional files the user uploaded — PDFs, images (screenshots), or
+   *  spreadsheets. Forwarded to Anthropic appropriately for each type.
+   *  All attachments bind to the first user message of the conversation so
+   *  they persist across follow-up turns. */
+  attachments?: QaAttachment[];
   /** Prior conversation turns, oldest first. The Anthropic API is stateless
    *  so the browser sends the full conversation on every follow-up. */
   history?: QaHistoryTurn[];
@@ -84,16 +85,16 @@ export async function askMark(input: AskInput): Promise<AskOutput> {
     question: input.question,
     dataAsOf,
     data,
-    pdfs: input.pdfs,
+    attachments: input.attachments,
     history: input.history,
   });
 
-  // Audit log: if the user attached PDFs, record the filenames in the question
-  // text so FinanceQuery shows "[PDFs attached: foo.pdf, bar.pdf] ..." instead
-  // of a bare question with no trace of the attachments.
+  // Audit log: if the user attached files, record the filenames in the
+  // question text so FinanceQuery shows "[Attached: a.pdf, b.xlsx, c.png] ..."
+  // instead of a bare question with no trace of the inputs.
   const auditQuestion =
-    input.pdfs && input.pdfs.length > 0
-      ? `[PDF${input.pdfs.length === 1 ? "" : "s"} attached: ${input.pdfs.map((p) => p.filename).join(", ")}] ${input.question}`
+    input.attachments && input.attachments.length > 0
+      ? `[Attached: ${input.attachments.map((a) => a.filename).join(", ")}] ${input.question}`
       : input.question;
 
   const row = await prisma.financeQuery.create({

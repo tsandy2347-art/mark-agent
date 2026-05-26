@@ -1,11 +1,21 @@
-// /qa — chat-style Q&A panel with multi-PDF support and multi-turn follow-ups.
+// /qa — chat-style Q&A panel with multi-file attachments + multi-turn follow-ups.
+//
+// Accepted attachment types:
+//   - PDF                          → Anthropic document content block (native)
+//   - PNG / JPEG / GIF / WebP      → Anthropic image content block (native)
+//   - Excel (.xlsx / .xls / .ods)  → server-side parsed to CSV text and
+//                                    embedded in the prompt
+//   - CSV                          → embedded as-is in the prompt
 //
 // Conversation state lives entirely in the browser:
-//   - turns:           rendered Q/A history (stored oldest-first, RENDERED
-//                      newest-first — Tony's preference)
-//   - attachedPdfs:    array of { name, size, base64 } that persists across
-//                      turns until cleared. Each turn re-sends the bytes
-//                      because the Anthropic API is stateless.
+//   - turns:        rendered Q/A history (stored oldest-first, rendered
+//                   newest-first — Tony's preference)
+//   - attachments:  array of { name, size, mimeType, base64 } that persists
+//                   across turns until cleared. Browser re-sends the bytes on
+//                   every follow-up (Anthropic API is stateless).
+//
+// Bonus: paste a screenshot directly into the textarea and it's added as an
+// image attachment automatically (no need to save the file first).
 
 "use client";
 
@@ -15,21 +25,104 @@ interface Turn {
   question: string;
   answer: string;
   dataAsOf: string;
-  /** Filenames of PDFs that were attached at the time of this turn (for the
-   *  turn render — informational only). */
-  pdfNames?: string[];
+  /** Filenames attached at the time of this turn (for the turn render). */
+  attachmentNames?: string[];
 }
 
-interface AttachedPdf {
+interface Attachment {
   name: string;
   size: number;
+  mimeType: string;
   base64: string;
 }
 
-const MAX_PDF_BYTES = 30 * 1024 * 1024;
-const MAX_TOTAL_PDF_BYTES = 80 * 1024 * 1024;
+type Category = "pdf" | "image" | "spreadsheet" | "csv";
 
-function fileToBase64(file: File): Promise<string> {
+const PDF_MIME = "application/pdf";
+const IMAGE_MIMES = new Set(["image/png", "image/jpeg", "image/gif", "image/webp"]);
+const SPREADSHEET_MIMES = new Set([
+  "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+  "application/vnd.ms-excel",
+  "application/vnd.oasis.opendocument.spreadsheet",
+]);
+const CSV_MIMES = new Set(["text/csv"]);
+
+const MAX_PDF_BYTES = 30 * 1024 * 1024;
+const MAX_IMAGE_BYTES = 8 * 1024 * 1024;
+const MAX_SPREADSHEET_BYTES = 10 * 1024 * 1024;
+const MAX_TOTAL_BYTES = 110 * 1024 * 1024;
+
+const ACCEPT_ATTRIBUTE = [
+  "application/pdf",
+  ".pdf",
+  "image/png",
+  "image/jpeg",
+  "image/gif",
+  "image/webp",
+  ".xlsx",
+  ".xls",
+  ".ods",
+  ".csv",
+  "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+  "application/vnd.ms-excel",
+  "application/vnd.oasis.opendocument.spreadsheet",
+  "text/csv",
+].join(",");
+
+function categoryOf(mime: string, filename = ""): Category | null {
+  const m = mime.toLowerCase();
+  if (m === PDF_MIME) return "pdf";
+  if (IMAGE_MIMES.has(m)) return "image";
+  if (SPREADSHEET_MIMES.has(m)) return "spreadsheet";
+  if (CSV_MIMES.has(m)) return "csv";
+  // Fallback to extension sniffing — browsers don't always set mimeType.
+  const ext = filename.toLowerCase().split(".").pop() ?? "";
+  if (ext === "pdf") return "pdf";
+  if (["png", "jpg", "jpeg", "gif", "webp"].includes(ext)) return "image";
+  if (["xlsx", "xls", "ods"].includes(ext)) return "spreadsheet";
+  if (ext === "csv") return "csv";
+  return null;
+}
+
+function effectiveMime(mime: string, filename: string): string {
+  // Browsers sometimes omit mimeType on drag/drop. Map from extension.
+  if (mime) return mime;
+  const ext = filename.toLowerCase().split(".").pop() ?? "";
+  switch (ext) {
+    case "pdf": return "application/pdf";
+    case "png": return "image/png";
+    case "jpg":
+    case "jpeg": return "image/jpeg";
+    case "gif": return "image/gif";
+    case "webp": return "image/webp";
+    case "xlsx": return "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet";
+    case "xls": return "application/vnd.ms-excel";
+    case "ods": return "application/vnd.oasis.opendocument.spreadsheet";
+    case "csv": return "text/csv";
+    default: return "";
+  }
+}
+
+function maxBytesFor(cat: Category): number {
+  switch (cat) {
+    case "pdf": return MAX_PDF_BYTES;
+    case "image": return MAX_IMAGE_BYTES;
+    case "spreadsheet":
+    case "csv": return MAX_SPREADSHEET_BYTES;
+  }
+}
+
+function iconFor(cat: Category | null): string {
+  switch (cat) {
+    case "pdf": return "📄";
+    case "image": return "🖼️";
+    case "spreadsheet": return "📊";
+    case "csv": return "📋";
+    default: return "📎";
+  }
+}
+
+function fileToBase64(file: File | Blob): Promise<string> {
   return new Promise((resolve, reject) => {
     const reader = new FileReader();
     reader.onload = () => {
@@ -48,34 +141,37 @@ function fileToBase64(file: File): Promise<string> {
 
 export default function QaPage() {
   const [question, setQuestion] = useState("");
-  const [attachedPdfs, setAttachedPdfs] = useState<AttachedPdf[]>([]);
+  const [attachments, setAttachments] = useState<Attachment[]>([]);
   const [turns, setTurns] = useState<Turn[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [flash, setFlash] = useState<string | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
 
   function pickFile() {
     fileInputRef.current?.click();
   }
 
-  async function onFile(e: React.ChangeEvent<HTMLInputElement>) {
-    const fs = Array.from(e.target.files ?? []);
-    if (fs.length === 0) return;
+  async function addFiles(rawFiles: File[]) {
+    if (rawFiles.length === 0) return;
     setError(null);
 
-    const toAdd: AttachedPdf[] = [];
-    for (const f of fs) {
-      if (f.type && f.type !== "application/pdf") {
-        setError(`Only PDF files are accepted — skipped ${f.name} (${f.type}).`);
+    const toAdd: Attachment[] = [];
+    for (const f of rawFiles) {
+      const mime = effectiveMime(f.type, f.name);
+      const cat = categoryOf(mime, f.name);
+      if (!cat) {
+        setError(`Unsupported file type: ${f.name} (${f.type || "unknown"}). Accepted: PDF, PNG/JPEG/GIF/WebP, Excel/CSV.`);
         continue;
       }
-      if (f.size > MAX_PDF_BYTES) {
-        setError(`Skipped ${f.name} — too large (${(f.size / 1_048_576).toFixed(1)} MB, max 30 MB per file).`);
+      const cap = maxBytesFor(cat);
+      if (f.size > cap) {
+        setError(`Skipped ${f.name} — too large (${(f.size / 1_048_576).toFixed(1)} MB, max ${(cap / 1_048_576).toFixed(0)} MB for ${cat}).`);
         continue;
       }
       try {
         const base64 = await fileToBase64(f);
-        toAdd.push({ name: f.name, size: f.size, base64 });
+        toAdd.push({ name: f.name, size: f.size, mimeType: mime, base64 });
       } catch (err) {
         setError(err instanceof Error ? err.message : String(err));
       }
@@ -86,18 +182,15 @@ export default function QaPage() {
       return;
     }
 
-    setAttachedPdfs((prev) => {
+    setAttachments((prev) => {
       const merged = [...prev, ...toAdd];
       const total = merged.reduce((s, p) => s + p.size, 0);
-      if (total > MAX_TOTAL_PDF_BYTES) {
-        setError(
-          `Total attached ${(total / 1_048_576).toFixed(1)} MB exceeds ${(MAX_TOTAL_PDF_BYTES / 1_048_576).toFixed(0)} MB cap — newest files not added.`,
-        );
-        // Add only as many as fit
-        const out: AttachedPdf[] = [...prev];
+      if (total > MAX_TOTAL_BYTES) {
+        setError(`Total attached ${(total / 1_048_576).toFixed(1)} MB exceeds ${(MAX_TOTAL_BYTES / 1_048_576).toFixed(0)} MB cap — newest files not added.`);
+        const out: Attachment[] = [...prev];
         let running = out.reduce((s, p) => s + p.size, 0);
         for (const p of toAdd) {
-          if (running + p.size <= MAX_TOTAL_PDF_BYTES) {
+          if (running + p.size <= MAX_TOTAL_BYTES) {
             out.push(p);
             running += p.size;
           }
@@ -110,18 +203,52 @@ export default function QaPage() {
     if (fileInputRef.current) fileInputRef.current.value = "";
   }
 
-  function removePdf(idx: number) {
-    setAttachedPdfs((prev) => prev.filter((_, i) => i !== idx));
+  async function onFile(e: React.ChangeEvent<HTMLInputElement>) {
+    await addFiles(Array.from(e.target.files ?? []));
   }
 
-  function clearAllPdfs() {
-    setAttachedPdfs([]);
+  /** Catch screenshots pasted into the textarea (Cmd+V after Cmd+Shift+4
+   *  on macOS, PrtScn on Windows). */
+  async function onPaste(e: React.ClipboardEvent<HTMLTextAreaElement>) {
+    const items = e.clipboardData?.items;
+    if (!items) return;
+    const imageFiles: File[] = [];
+    for (let i = 0; i < items.length; i++) {
+      const it = items[i];
+      if (it.kind === "file" && it.type.startsWith("image/")) {
+        const blob = it.getAsFile();
+        if (blob) {
+          // Synthesize a filename — paste blobs have name === "" by default.
+          const ext = blob.type.split("/")[1] ?? "png";
+          const ts = new Date()
+            .toISOString()
+            .replace(/[:.]/g, "-")
+            .slice(0, 19);
+          const file = new File([blob], `screenshot-${ts}.${ext}`, { type: blob.type });
+          imageFiles.push(file);
+        }
+      }
+    }
+    if (imageFiles.length > 0) {
+      e.preventDefault();
+      await addFiles(imageFiles);
+      setFlash(`📎 Attached ${imageFiles.length} pasted image${imageFiles.length === 1 ? "" : "s"}`);
+      setTimeout(() => setFlash(null), 2500);
+    }
+  }
+
+  function removeAttachment(idx: number) {
+    setAttachments((prev) => prev.filter((_, i) => i !== idx));
+  }
+
+  function clearAllAttachments() {
+    setAttachments([]);
     if (fileInputRef.current) fileInputRef.current.value = "";
   }
 
   function clearConversation() {
     setTurns([]);
-    setAttachedPdfs([]);
+    setAttachments([]);
     setQuestion("");
     setError(null);
     if (fileInputRef.current) fileInputRef.current.value = "";
@@ -130,10 +257,8 @@ export default function QaPage() {
   async function ask() {
     const q = question.trim();
     const isFirstTurn = turns.length === 0;
-    // First turn allowed PDF-only (no question); follow-ups require a question.
-    if (!q && !(isFirstTurn && attachedPdfs.length > 0)) {
-      return;
-    }
+    if (!q && !(isFirstTurn && attachments.length > 0)) return;
+
     setLoading(true);
     setError(null);
     try {
@@ -145,8 +270,12 @@ export default function QaPage() {
         question: q,
         history,
       };
-      if (attachedPdfs.length > 0) {
-        payload.pdfs = attachedPdfs.map((p) => ({ filename: p.name, base64: p.base64 }));
+      if (attachments.length > 0) {
+        payload.attachments = attachments.map((a) => ({
+          filename: a.name,
+          mimeType: a.mimeType,
+          base64: a.base64,
+        }));
       }
       const res = await fetch("/api/qa", {
         method: "POST",
@@ -159,16 +288,15 @@ export default function QaPage() {
       }
       const turnQuestion =
         q ||
-        `(uploaded ${attachedPdfs.length} PDF${attachedPdfs.length === 1 ? "" : "s"} with no question — Mark used his default prompt)`;
-      // Only the FIRST turn of the conversation needs the PDF-name annotation
-      // (the same files persist across follow-ups; not worth repeating).
+        `(attached ${attachments.length} file${attachments.length === 1 ? "" : "s"} with no question — Mark used his default prompt)`;
       setTurns((prev) => [
         ...prev,
         {
           question: turnQuestion,
           answer: String(json.answer),
           dataAsOf: String(json.dataAsOf),
-          pdfNames: isFirstTurn && attachedPdfs.length > 0 ? attachedPdfs.map((p) => p.name) : undefined,
+          attachmentNames:
+            isFirstTurn && attachments.length > 0 ? attachments.map((p) => p.name) : undefined,
         },
       ]);
       setQuestion("");
@@ -181,27 +309,26 @@ export default function QaPage() {
 
   const inConversation = turns.length > 0;
   const askDisabled =
-    loading || (!question.trim() && !(turns.length === 0 && attachedPdfs.length > 0));
-  const totalPdfKb = Math.round(attachedPdfs.reduce((s, p) => s + p.size, 0) / 1024);
-  // Render newest first (Tony's preference). Store stays oldest-first.
+    loading || (!question.trim() && !(turns.length === 0 && attachments.length > 0));
+  const totalKb = Math.round(attachments.reduce((s, p) => s + p.size, 0) / 1024);
   const renderedTurns = [...turns].reverse();
 
   return (
     <main className="container">
       <h1>Ask Mark</h1>
       <p className="muted">
-        Natural-language questions against current ingested data. You can attach one or
-        more PDFs — Mark reads them directly and reasons about them alongside the
-        specialists' data. Attached PDFs stay in the conversation across follow-up
-        turns until you remove them or clear the conversation. Same rules: he never
-        invents figures; if he can't answer from what's in front of him, he says so.
+        Natural-language questions against current ingested data. Attach PDFs,
+        screenshots, Excel files (.xlsx/.xls/.ods/.csv) or paste a screenshot
+        directly into the box below. Attachments stay in the conversation across
+        follow-up turns until you remove them. Same rules: Mark never invents
+        figures; if he can't answer from what's in front of him, he says so.
       </p>
 
       <div className="card" style={{ marginTop: 12 }}>
         <label className="field-label" htmlFor="q">
           {inConversation
             ? "Follow-up"
-            : "Question (optional if you attach a PDF)"}
+            : "Question (optional if you attach a file or paste a screenshot)"}
         </label>
         <textarea
           id="q"
@@ -209,10 +336,11 @@ export default function QaPage() {
           placeholder={
             inConversation
               ? "Drill in, push back, ask for the next angle…"
-              : "e.g. What's CQ's cash position? What do you make of these invoices? Does this email change anything?"
+              : "e.g. What's CQ's cash position? What do you make of this report? Does this email change anything?"
           }
           value={question}
           onChange={(e) => setQuestion(e.target.value)}
+          onPaste={onPaste}
           onKeyDown={(e) => {
             if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) {
               e.preventDefault();
@@ -224,7 +352,7 @@ export default function QaPage() {
         <input
           ref={fileInputRef}
           type="file"
-          accept="application/pdf,.pdf"
+          accept={ACCEPT_ATTRIBUTE}
           multiple
           onChange={onFile}
           style={{ display: "none" }}
@@ -244,8 +372,8 @@ export default function QaPage() {
               ? "Asking..."
               : inConversation
                 ? "Send follow-up"
-                : attachedPdfs.length > 0
-                  ? `Ask Mark about ${attachedPdfs.length} PDF${attachedPdfs.length === 1 ? "" : "s"}`
+                : attachments.length > 0
+                  ? `Ask Mark about ${attachments.length} attachment${attachments.length === 1 ? "" : "s"}`
                   : "Ask"}
           </button>
           <button
@@ -255,7 +383,7 @@ export default function QaPage() {
             disabled={loading}
             style={{ background: "transparent", border: "1px solid currentColor" }}
           >
-            {attachedPdfs.length > 0 ? "Add more PDFs" : "Attach PDF(s)"}
+            {attachments.length > 0 ? "Add more files" : "Attach files"}
           </button>
           {inConversation ? (
             <button
@@ -269,14 +397,14 @@ export default function QaPage() {
                 border: "1px solid currentColor",
                 fontSize: 12,
               }}
-              title="Start a fresh conversation (wipes history + PDFs)"
+              title="Start a fresh conversation (wipes history + attachments)"
             >
               Clear conversation
             </button>
           ) : null}
         </div>
 
-        {attachedPdfs.length > 0 ? (
+        {attachments.length > 0 ? (
           <div
             style={{
               marginTop: 10,
@@ -295,11 +423,11 @@ export default function QaPage() {
               }}
             >
               <span className="muted" style={{ fontSize: 12 }}>
-                Attached {attachedPdfs.length} PDF{attachedPdfs.length === 1 ? "" : "s"} ({totalPdfKb} KB total) — stays attached across turns
+                {attachments.length} attachment{attachments.length === 1 ? "" : "s"} ({totalKb} KB total) — stays attached across turns
               </span>
               <button
                 type="button"
-                onClick={clearAllPdfs}
+                onClick={clearAllAttachments}
                 disabled={loading}
                 style={{
                   background: "transparent",
@@ -314,51 +442,44 @@ export default function QaPage() {
               </button>
             </div>
             <ul style={{ listStyle: "none", margin: 0, padding: 0, display: "flex", flexDirection: "column", gap: 4 }}>
-              {attachedPdfs.map((p, i) => (
-                <li
-                  key={`${p.name}-${i}`}
-                  style={{
-                    display: "flex",
-                    alignItems: "center",
-                    gap: 8,
-                    fontSize: 13,
-                  }}
-                >
-                  <span>📎</span>
-                  <span style={{ flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-                    {p.name}
-                  </span>
-                  <span className="muted" style={{ fontSize: 11 }}>
-                    {(p.size / 1024).toFixed(0)} KB
-                  </span>
-                  <button
-                    type="button"
-                    onClick={() => removePdf(i)}
-                    disabled={loading}
-                    aria-label={`Remove ${p.name}`}
-                    title={`Remove ${p.name}`}
-                    style={{
-                      background: "transparent",
-                      border: "none",
-                      cursor: "pointer",
-                      fontSize: 14,
-                    }}
+              {attachments.map((p, i) => {
+                const cat = categoryOf(p.mimeType, p.name);
+                return (
+                  <li
+                    key={`${p.name}-${i}`}
+                    style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 13 }}
                   >
-                    ✕
-                  </button>
-                </li>
-              ))}
+                    <span>{iconFor(cat)}</span>
+                    <span style={{ flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                      {p.name}
+                    </span>
+                    <span className="muted" style={{ fontSize: 11 }}>
+                      {cat ?? "file"} · {(p.size / 1024).toFixed(0)} KB
+                    </span>
+                    <button
+                      type="button"
+                      onClick={() => removeAttachment(i)}
+                      disabled={loading}
+                      aria-label={`Remove ${p.name}`}
+                      title={`Remove ${p.name}`}
+                      style={{ background: "transparent", border: "none", cursor: "pointer", fontSize: 14 }}
+                    >
+                      ✕
+                    </button>
+                  </li>
+                );
+              })}
             </ul>
           </div>
         ) : (
           <div className="muted" style={{ fontSize: 12, marginTop: 8 }}>
-            Cmd/Ctrl + Enter to send. Up to 30 MB per file, 80 MB total.
+            Cmd/Ctrl + Enter to send. Paste a screenshot directly. PDF/Excel
+            up to 30/10 MB, images up to 8 MB, 110 MB total.
           </div>
         )}
 
-        {error ? (
-          <div style={{ color: "var(--rose, #c33)", fontSize: 12, marginTop: 8 }}>{error}</div>
-        ) : null}
+        {flash ? <div style={{ color: "var(--accent, #2a7)", fontSize: 12, marginTop: 8 }}>{flash}</div> : null}
+        {error ? <div style={{ color: "var(--rose, #c33)", fontSize: 12, marginTop: 8 }}>{error}</div> : null}
       </div>
 
       <h2 style={{ marginTop: 22 }}>
@@ -374,12 +495,11 @@ export default function QaPage() {
       ) : (
         <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
           {renderedTurns.map((t, i) => {
-            // Convert reversed index back to original turn number for the label
             const turnNumber = turns.length - i;
             return (
               <div key={turnNumber} className="card">
                 <div className="muted" style={{ fontSize: 11, textTransform: "uppercase", letterSpacing: 1.2 }}>
-                  Turn {turnNumber}{t.pdfNames && t.pdfNames.length > 0 ? ` — PDFs: ${t.pdfNames.join(", ")}` : ""}
+                  Turn {turnNumber}{t.attachmentNames && t.attachmentNames.length > 0 ? ` — Files: ${t.attachmentNames.join(", ")}` : ""}
                 </div>
                 <div className="muted" style={{ fontSize: 11, textTransform: "uppercase", letterSpacing: 1.2, marginTop: 6 }}>
                   You asked

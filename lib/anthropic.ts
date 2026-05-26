@@ -225,8 +225,24 @@ export interface QaHistoryTurn {
   text: string;
 }
 
+/** Legacy alias kept so older callers / external integrations don't break. */
 export interface QaPdf {
   filename: string;
+  base64: string;
+}
+
+/** A user-attached file. Mime type drives how it's handed to Anthropic:
+ *  - application/pdf                       → document content block (native)
+ *  - image/png | image/jpeg | image/gif    → image content block (native)
+ *  - image/webp                            → image content block (native)
+ *  - .xlsx | .xls (sheet mime types)       → server-side parsed to text and
+ *                                            embedded in the text prompt
+ *                                            (Anthropic doesn't read Excel
+ *                                            natively).
+ */
+export interface QaAttachment {
+  filename: string;
+  mimeType: string;
   base64: string;
 }
 
@@ -234,15 +250,108 @@ interface QaInput {
   question: string;
   dataAsOf: string;
   data: unknown;
-  /** Optional PDFs the user uploaded. Anthropic API takes the bytes directly
-   *  as `document` content blocks — no local pdf-parse. All PDFs are attached
-   *  to the FIRST user message of the conversation, so they persist in context
-   *  across follow-up turns. */
-  pdfs?: QaPdf[];
+  /** Optional files the user uploaded (PDFs / images / spreadsheets). All
+   *  attachments are bound to the FIRST user message of the conversation so
+   *  they persist in context across follow-up turns. */
+  attachments?: QaAttachment[];
   /** Prior conversation turns, oldest first. Each follow-up turn replays the
    *  full conversation — the Anthropic API is stateless, so we send the whole
    *  thing every time. */
   history?: QaHistoryTurn[];
+}
+
+const IMAGE_MIME_TYPES = new Set([
+  "image/png",
+  "image/jpeg",
+  "image/gif",
+  "image/webp",
+]);
+
+const EXCEL_MIME_TYPES = new Set([
+  "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", // .xlsx
+  "application/vnd.ms-excel",                                          // .xls
+  "application/vnd.oasis.opendocument.spreadsheet",                    // .ods
+  "text/csv",                                                          // CSV — treat like Excel for prompt embedding
+]);
+
+const PDF_MIME_TYPE = "application/pdf";
+
+/** Hard cap on the text we'll inject from a single spreadsheet. Excel files
+ *  can easily explode into millions of cells; chopping at 50k chars keeps
+ *  the context usable. We tell the model when we truncated. */
+const SPREADSHEET_TEXT_CAP = 50_000;
+
+interface SortedAttachments {
+  pdfs: QaAttachment[];
+  images: Array<{ attachment: QaAttachment; mediaType: "image/png" | "image/jpeg" | "image/gif" | "image/webp" }>;
+  spreadsheets: QaAttachment[];
+}
+
+function sortAttachments(atts: QaAttachment[]): SortedAttachments {
+  const out: SortedAttachments = { pdfs: [], images: [], spreadsheets: [] };
+  for (const a of atts) {
+    const mt = a.mimeType.toLowerCase();
+    if (mt === PDF_MIME_TYPE) {
+      out.pdfs.push(a);
+    } else if (IMAGE_MIME_TYPES.has(mt)) {
+      out.images.push({ attachment: a, mediaType: mt as "image/png" | "image/jpeg" | "image/gif" | "image/webp" });
+    } else if (EXCEL_MIME_TYPES.has(mt)) {
+      out.spreadsheets.push(a);
+    }
+    // Unknown mime types are silently dropped — route layer should have
+    // rejected them already. Defence in depth.
+  }
+  return out;
+}
+
+/** Convert one spreadsheet's bytes into a text representation Claude can
+ *  read. Each sheet becomes a CSV-ish block. Truncated at SPREADSHEET_TEXT_CAP
+ *  with an explicit notice. Uses dynamic import so the xlsx lib isn't pulled
+ *  into the client bundle. */
+async function spreadsheetToText(a: QaAttachment): Promise<string> {
+  // eslint-disable-next-line @typescript-eslint/no-var-requires
+  const XLSX = await import("xlsx");
+  const buf = Buffer.from(a.base64, "base64");
+  let wb;
+  try {
+    wb = XLSX.read(buf, { type: "buffer" });
+  } catch (e) {
+    return `[spreadsheet "${a.filename}": failed to parse — ${e instanceof Error ? e.message : String(e)}]`;
+  }
+  const parts: string[] = [];
+  parts.push(`### Spreadsheet: ${a.filename}`);
+  parts.push(`Sheets: ${wb.SheetNames.length} (${wb.SheetNames.join(", ")})`);
+  let used = 0;
+  let truncated = false;
+  for (const name of wb.SheetNames) {
+    const sheet = wb.Sheets[name];
+    if (!sheet) continue;
+    const csv = XLSX.utils.sheet_to_csv(sheet, { blankrows: false, FS: ",", RS: "\n" });
+    const head = `\n--- Sheet: ${name} ---\n`;
+    const remaining = SPREADSHEET_TEXT_CAP - used - head.length;
+    if (remaining <= 0) {
+      truncated = true;
+      break;
+    }
+    parts.push(head);
+    used += head.length;
+    if (csv.length > remaining) {
+      parts.push(csv.slice(0, remaining));
+      parts.push(`\n[…truncated, sheet larger than budget…]`);
+      used += remaining;
+      truncated = true;
+      break;
+    } else {
+      parts.push(csv);
+      used += csv.length;
+    }
+  }
+  if (truncated) {
+    parts.push(
+      `\n\n[Note: contents truncated at ${SPREADSHEET_TEXT_CAP.toLocaleString()} chars total — the full spreadsheet is larger. Ask the user to filter or split if you need more.]`,
+    );
+  }
+  return parts.join("");
 }
 
 export interface QaOutput {
@@ -261,44 +370,89 @@ export async function answerQuestion(input: QaInput): Promise<QaOutput> {
     };
   }
   try {
-    const pdfs = input.pdfs ?? [];
-    const pdfNote =
-      pdfs.length > 0
-        ? `The user has ATTACHED ${pdfs.length} PDF${pdfs.length === 1 ? "" : "s"}: ` +
-          pdfs.map((p) => `"${p.filename}"`).join(", ") +
-          `. Read each one carefully. Reason about their contents alongside the JBC ` +
-          `finance data below. Same rules apply: only use figures that actually appear ` +
-          `in the PDFs or the data — do not invent. If a document is outside JBC ` +
-          `finance scope, say so honestly. When referring to a figure or quote from ` +
-          `a PDF, name the file it came from so the reader can trace it.\n\n`
+    const attachments = input.attachments ?? [];
+    const sorted = sortAttachments(attachments);
+    const totalCount = sorted.pdfs.length + sorted.images.length + sorted.spreadsheets.length;
+
+    // Pre-render spreadsheets to text (only ones we'll attach this turn).
+    const spreadsheetTexts: string[] = [];
+    for (const s of sorted.spreadsheets) {
+      spreadsheetTexts.push(await spreadsheetToText(s));
+    }
+
+    // Inventory string the model sees so it knows what was attached
+    // and how it's being represented.
+    const inventoryParts: string[] = [];
+    if (sorted.pdfs.length > 0) {
+      inventoryParts.push(
+        `${sorted.pdfs.length} PDF${sorted.pdfs.length === 1 ? "" : "s"} (` +
+          sorted.pdfs.map((p) => `"${p.filename}"`).join(", ") +
+          `, native document blocks)`,
+      );
+    }
+    if (sorted.images.length > 0) {
+      inventoryParts.push(
+        `${sorted.images.length} image${sorted.images.length === 1 ? "" : "s"} (` +
+          sorted.images.map((i) => `"${i.attachment.filename}"`).join(", ") +
+          `, native image blocks)`,
+      );
+    }
+    if (sorted.spreadsheets.length > 0) {
+      inventoryParts.push(
+        `${sorted.spreadsheets.length} spreadsheet${sorted.spreadsheets.length === 1 ? "" : "s"} (` +
+          sorted.spreadsheets.map((s) => `"${s.filename}"`).join(", ") +
+          `, parsed to CSV text and embedded below)`,
+      );
+    }
+    const attachmentNote =
+      totalCount > 0
+        ? `The user has ATTACHED: ${inventoryParts.join("; ")}. Read each one carefully. ` +
+          `Reason about their contents alongside the JBC finance data below. Same rules ` +
+          `apply: only use figures that actually appear in the attachments or the data — ` +
+          `do not invent. If an attachment is outside JBC finance scope, say so honestly. ` +
+          `When referring to a figure or quote from an attachment, NAME the source file ` +
+          `so the reader can trace it.\n\n`
         : "";
 
-    // Build the full message history. PDFs (if any) all go on the first user
-    // message — that's either history[0] or, if there's no history, the
-    // current question itself.
+    // Build the full message history. Attachments all bind to the FIRST user
+    // message of the conversation — either history[0] or, if there's no
+    // history, the current question.
     const messages: Anthropic.Messages.MessageParam[] = [];
-    let pdfPlaced = false;
+    let attachmentsPlaced = false;
 
-    function userContentBlocks(text: string, attachPdfs: boolean): Anthropic.Messages.ContentBlockParam[] {
+    // All attachments — PDFs, images, AND spreadsheet text — bind to the
+    // FIRST user message of the conversation so they're in context exactly
+    // once. Re-injecting on every turn would explode the token budget.
+    function userContentBlocks(text: string, attachFiles: boolean): Anthropic.Messages.ContentBlockParam[] {
       const blocks: Anthropic.Messages.ContentBlockParam[] = [];
-      if (attachPdfs) {
-        for (const p of pdfs) {
+      if (attachFiles) {
+        for (const p of sorted.pdfs) {
           blocks.push({
             type: "document",
             source: { type: "base64", media_type: "application/pdf", data: p.base64 },
             title: p.filename,
           });
         }
+        for (const img of sorted.images) {
+          blocks.push({
+            type: "image",
+            source: { type: "base64", media_type: img.mediaType, data: img.attachment.base64 },
+          });
+        }
       }
-      blocks.push({ type: "text", text });
+      const finalText =
+        attachFiles && spreadsheetTexts.length > 0
+          ? `Spreadsheet contents (text extraction):\n${spreadsheetTexts.join("\n\n")}\n\n` + text
+          : text;
+      blocks.push({ type: "text", text: finalText });
       return blocks;
     }
 
     for (const turn of input.history ?? []) {
       if (turn.role === "user") {
-        const attach = !pdfPlaced && pdfs.length > 0;
+        const attach = !attachmentsPlaced && totalCount > 0;
         messages.push({ role: "user", content: userContentBlocks(turn.text, attach) });
-        if (attach) pdfPlaced = true;
+        if (attach) attachmentsPlaced = true;
       } else {
         messages.push({ role: "assistant", content: turn.text });
       }
@@ -306,14 +460,14 @@ export async function answerQuestion(input: QaInput): Promise<QaOutput> {
 
     const currentText =
       `Question from a team member: ${input.question}\n\n` +
-      pdfNote +
+      attachmentNote +
       `Data as of: ${input.dataAsOf}\n\n` +
       `Structured data you may use to answer (only use figures present here — ` +
       `if the answer is not in here, say so):\n` +
       `${JSON.stringify(input.data)}\n\n` +
       `Answer in plain English. End with: "Data as of ${input.dataAsOf}."`;
 
-    const attachCurrent = !pdfPlaced && pdfs.length > 0;
+    const attachCurrent = !attachmentsPlaced && totalCount > 0;
     messages.push({ role: "user", content: userContentBlocks(currentText, attachCurrent) });
 
     const resp = await c.messages.create({
