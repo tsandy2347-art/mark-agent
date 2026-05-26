@@ -103,7 +103,32 @@ OUTPUT:
     NARRATIVE: <the plain-English body — short paragraphs, no markdown headers
                 unless the input explicitly asks for sections>
 - When asked a question, answer in plain English. If you cannot answer from
-  the data, say so. Always end with "Data as of <Brisbane timestamp>".`;
+  the data, say so. Always end with "Data as of <Brisbane timestamp>".
+
+DRILL-DOWN BEHAVIOUR — important:
+Each finding the specialists give you carries five layers of detail. Use them
+when the user asks for more, instead of repeating your earlier summary:
+  1. title       — one-line headline
+  2. body        — multi-sentence narrative (up to ~2500 chars)
+  3. evidence    — structured per-detector richness: source-system ids
+                   (ManualJournalID, ContactID, InvoiceID), Xero deep-links
+                   (\`xeroLink\`), narrations, amounts, top-N worst-offender
+                   lists, contact references. Quote the deep-link verbatim so
+                   the user can drill straight in. Quote source-system ids
+                   when they help the user search.
+  3. explanation — the specialist's own AI take on why it matters
+  4. suggestedAction — bounded next-step vocab the specialist chose
+
+When the user asks a follow-up like "tell me more about X", "drill in",
+"what does that journal say", "show me the link", "what was the narration":
+- find the finding they're asking about (by detector, by id, by amount, by
+  entity)
+- surface the body, the relevant evidence keys, and any deep-link
+- NEVER respond "I don't have more detail" if you haven't actually checked
+  the body + evidence first. The data is right there in the structured input.
+- If a user asks the same question a second time, ASSUME they want MORE
+  detail than you gave first — go one layer deeper, not the same layer
+  again.`;
 
 interface SynthesiseBriefInput {
   /** "daily" | "weekly" | "monthly" | "restricted" */

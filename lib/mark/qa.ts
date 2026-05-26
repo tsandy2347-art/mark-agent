@@ -74,19 +74,42 @@ export async function askMark(input: AskInput): Promise<AskOutput> {
       : Promise.resolve({ resume: [], memoryBlock: null, disabled: !env.HONCHO_BASE_URL, errored: false }),
   ]);
 
-  // Compact the findings to a shape that's cheap to put in the context window
-  // and that excludes raw evidence ids (which are noisy and not useful for
-  // the model).
-  const compactFindings = findings.map((f) => ({
-    agent: f.specialistAgent,
-    severity: f.severity,
-    entity: f.entityCode,
-    detector: f.detector,
-    title: f.title,
-    body: f.body.slice(0, 600),
-    amount: f.amount == null ? null : Number(f.amount),
-    at: f.at.toISOString(),
-  }));
+  // Findings shape passed to Claude. Previously this was aggressively
+  // compacted (body capped at 600 chars, evidence stripped, explanation
+  // omitted) which meant Mark physically had nothing to drill into when
+  // the user asked a follow-up like "tell me more about X". He'd just
+  // re-summarise the same 600 chars. We now include:
+  //   - Full body up to 2500 chars (enough for most narratives — only
+  //     pathologically long ones get clipped, and we mark when we do)
+  //   - The full `evidence` object — that's where per-detector richness
+  //     lives now (Xero deep-links, ManualJournalID, narrations,
+  //     top-N worst-offender lists, etc.)
+  //   - The AI `explanation` from the source specialist's classifier
+  //   - `suggestedAction` — the bounded next-step vocab the specialist chose
+  // Cost: ~2-3KB per finding × 400 findings ≈ 1MB of context. Sonnet 4.6's
+  // window has plenty of room; this is well worth it for drill-down quality.
+  const compactFindings = findings.map((f) => {
+    const fullBody = f.body ?? "";
+    const body = fullBody.length > 2500 ? fullBody.slice(0, 2497) + "..." : fullBody;
+    return {
+      agent: f.specialistAgent,
+      severity: f.severity,
+      entity: f.entityCode,
+      detector: f.detector,
+      title: f.title,
+      body,
+      bodyTruncated: fullBody.length > 2500,
+      amount: f.amount == null ? null : Number(f.amount),
+      at: f.at.toISOString(),
+      // Per-detector evidence — Xero deep-links, source ids, narrations etc.
+      // Treat as opaque; quote keys verbatim if the user asks for the source.
+      evidence: f.evidenceJson ?? null,
+      // Specialist's AI explanation of why this matters. May be null.
+      explanation: f.explanation ?? null,
+      // The specialist's bounded suggested next action.
+      suggestedAction: f.suggestedAction ?? null,
+    };
+  });
 
   const data = {
     findings: compactFindings,
