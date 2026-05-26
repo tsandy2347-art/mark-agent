@@ -1,6 +1,14 @@
-// /qa — chat-style Q&A panel. Client component (uses local state for input +
-// rendered conversation). POSTs to /api/qa which records every Q&A pair in
-// FinanceQuery.
+// /qa — chat-style Q&A panel with PDF support and multi-turn follow-ups.
+//
+// Conversation state lives entirely in the browser:
+//   - turns:        rendered Q/A history
+//   - attachedPdf:  { name, base64 } that persists across turns until cleared.
+//                   We read the file to base64 once when picked, then re-send
+//                   the bytes in every POST (the Anthropic API is stateless,
+//                   so each follow-up needs the document block again).
+//
+// "Clear conversation" wipes turns + the attached PDF; "Remove PDF" leaves
+// the conversation but detaches the document so further turns are text-only.
 
 "use client";
 
@@ -10,12 +18,39 @@ interface Turn {
   question: string;
   answer: string;
   dataAsOf: string;
+  /** Set on the first turn of a conversation that included a PDF, for display. */
   pdfName?: string;
+}
+
+interface AttachedPdf {
+  name: string;
+  size: number;
+  base64: string;
+}
+
+const MAX_PDF_BYTES = 30 * 1024 * 1024;
+
+function fileToBase64(file: File): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => {
+      const result = reader.result;
+      if (typeof result !== "string") {
+        reject(new Error("FileReader returned non-string"));
+        return;
+      }
+      // data URL → strip "data:application/pdf;base64,"
+      const i = result.indexOf(",");
+      resolve(i >= 0 ? result.slice(i + 1) : result);
+    };
+    reader.onerror = () => reject(reader.error ?? new Error("FileReader failed"));
+    reader.readAsDataURL(file);
+  });
 }
 
 export default function QaPage() {
   const [question, setQuestion] = useState("");
-  const [file, setFile] = useState<File | null>(null);
+  const [attachedPdf, setAttachedPdf] = useState<AttachedPdf | null>(null);
   const [turns, setTurns] = useState<Turn[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -25,60 +60,83 @@ export default function QaPage() {
     fileInputRef.current?.click();
   }
 
-  function onFile(e: React.ChangeEvent<HTMLInputElement>) {
+  async function onFile(e: React.ChangeEvent<HTMLInputElement>) {
     const f = e.target.files?.[0] ?? null;
-    if (f && f.type && f.type !== "application/pdf") {
+    if (!f) return;
+    if (f.type && f.type !== "application/pdf") {
       setError(`Only PDF files are accepted (got ${f.type}).`);
       return;
     }
-    if (f && f.size > 30 * 1024 * 1024) {
+    if (f.size > MAX_PDF_BYTES) {
       setError(`PDF too large (${(f.size / 1_048_576).toFixed(1)} MB, max 30 MB).`);
       return;
     }
     setError(null);
-    setFile(f);
+    try {
+      const base64 = await fileToBase64(f);
+      setAttachedPdf({ name: f.name, size: f.size, base64 });
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    }
   }
 
   function clearFile() {
-    setFile(null);
+    setAttachedPdf(null);
+    if (fileInputRef.current) fileInputRef.current.value = "";
+  }
+
+  function clearConversation() {
+    setTurns([]);
+    setAttachedPdf(null);
+    setQuestion("");
+    setError(null);
     if (fileInputRef.current) fileInputRef.current.value = "";
   }
 
   async function ask() {
     const q = question.trim();
-    if (!q && !file) return;
+    if (!q && (turns.length > 0 || !attachedPdf)) {
+      // No question on a follow-up turn (or with no PDF on the first turn).
+      return;
+    }
     setLoading(true);
     setError(null);
     try {
-      let res: Response;
-      if (file) {
-        const fd = new FormData();
-        fd.append("question", q);
-        fd.append("file", file);
-        res = await fetch("/api/qa", { method: "POST", body: fd });
-      } else {
-        res = await fetch("/api/qa", {
-          method: "POST",
-          headers: { "content-type": "application/json" },
-          body: JSON.stringify({ question: q }),
-        });
+      const history = turns.flatMap((t) => [
+        { role: "user" as const, text: t.question },
+        { role: "assistant" as const, text: t.answer },
+      ]);
+      const payload: Record<string, unknown> = {
+        question: q,
+        history,
+      };
+      if (attachedPdf) {
+        payload.pdf = { filename: attachedPdf.name, base64: attachedPdf.base64 };
       }
+      const res = await fetch("/api/qa", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(payload),
+      });
       const json = await res.json();
       if (!res.ok || !json.ok) {
         throw new Error(json.error ?? `HTTP ${res.status}`);
       }
-      const turnQuestion = q || `(uploaded ${file?.name} with no question — Mark used his default prompt)`;
+      const turnQuestion =
+        q || `(uploaded ${attachedPdf?.name} with no question — Mark used his default prompt)`;
+      // Tag the first turn of the conversation with the PDF name so the
+      // rendered history shows where the document entered.
+      const isFirstTurn = turns.length === 0;
       setTurns((prev) => [
         ...prev,
         {
           question: turnQuestion,
           answer: String(json.answer),
           dataAsOf: String(json.dataAsOf),
-          pdfName: file?.name,
+          pdfName: isFirstTurn && attachedPdf ? attachedPdf.name : undefined,
         },
       ]);
       setQuestion("");
-      clearFile();
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     } finally {
@@ -86,21 +144,34 @@ export default function QaPage() {
     }
   }
 
+  const inConversation = turns.length > 0;
+  const askDisabled =
+    loading ||
+    (!question.trim() && !(turns.length === 0 && attachedPdf));
+
   return (
     <main className="container">
       <h1>Ask Mark</h1>
       <p className="muted">
-        Natural-language questions against current ingested data. You can also attach a PDF —
-        Mark reads it directly and reasons about it alongside the specialists' data. Same rules
-        apply: he never invents figures. If he can't answer from what's in front of him, he says so.
+        Natural-language questions against current ingested data. You can attach a PDF —
+        Mark reads it directly and reasons about it alongside the specialists' data. The
+        PDF stays attached across follow-up turns until you remove it or clear the
+        conversation. Same rules: he never invents figures; if he can't answer from
+        what's in front of him, he says so.
       </p>
 
       <div className="card" style={{ marginTop: 12 }}>
-        <label className="field-label" htmlFor="q">Question (optional if you attach a PDF)</label>
+        <label className="field-label" htmlFor="q">
+          {inConversation ? "Follow-up" : "Question (optional if you attach a PDF)"}
+        </label>
         <textarea
           id="q"
           rows={3}
-          placeholder="e.g. What's CQ's cash position? What do you make of this invoice? Does this email change anything?"
+          placeholder={
+            inConversation
+              ? "Drill in, push back, ask for the next angle…"
+              : "e.g. What's CQ's cash position? What do you make of this invoice? Does this email change anything?"
+          }
           value={question}
           onChange={(e) => setQuestion(e.target.value)}
           onKeyDown={(e) => {
@@ -128,12 +199,8 @@ export default function QaPage() {
             flexWrap: "wrap",
           }}
         >
-          <button
-            className="btn btn-primary"
-            onClick={ask}
-            disabled={loading || (!question.trim() && !file)}
-          >
-            {loading ? "Asking..." : file ? "Ask Mark about this PDF" : "Ask"}
+          <button className="btn btn-primary" onClick={ask} disabled={askDisabled}>
+            {loading ? "Asking..." : inConversation ? "Send follow-up" : attachedPdf ? "Ask Mark about this PDF" : "Ask"}
           </button>
           <button
             type="button"
@@ -142,25 +209,21 @@ export default function QaPage() {
             disabled={loading}
             style={{ background: "transparent", border: "1px solid currentColor" }}
           >
-            {file ? "Replace PDF" : "Attach PDF"}
+            {attachedPdf ? "Replace PDF" : "Attach PDF"}
           </button>
-          {file ? (
+          {attachedPdf ? (
             <span
               className="muted"
               style={{ fontSize: 12, display: "inline-flex", alignItems: "center", gap: 6 }}
             >
-              {file.name} ({(file.size / 1024).toFixed(0)} KB)
+              📎 {attachedPdf.name} ({(attachedPdf.size / 1024).toFixed(0)} KB) — stays attached
               <button
                 type="button"
                 onClick={clearFile}
                 disabled={loading}
-                style={{
-                  background: "transparent",
-                  border: "none",
-                  cursor: "pointer",
-                  fontSize: 14,
-                }}
+                style={{ background: "transparent", border: "none", cursor: "pointer", fontSize: 14 }}
                 aria-label="Remove attached PDF"
+                title="Remove PDF (conversation stays)"
               >
                 ✕
               </button>
@@ -170,12 +233,31 @@ export default function QaPage() {
               Cmd/Ctrl + Enter to send. PDF max 30 MB.
             </span>
           )}
+          {inConversation ? (
+            <button
+              type="button"
+              className="btn"
+              onClick={clearConversation}
+              disabled={loading}
+              style={{
+                marginLeft: "auto",
+                background: "transparent",
+                border: "1px solid currentColor",
+                fontSize: 12,
+              }}
+              title="Start a fresh conversation (wipes history + PDF)"
+            >
+              Clear conversation
+            </button>
+          ) : null}
           {error ? <span style={{ color: "var(--rose)", fontSize: 12 }}>{error}</span> : null}
         </div>
       </div>
 
-      <h2 style={{ marginTop: 22 }}>Conversation</h2>
-      {turns.length === 0 ? (
+      <h2 style={{ marginTop: 22 }}>
+        Conversation{inConversation ? ` (${turns.length} turn${turns.length === 1 ? "" : "s"})` : ""}
+      </h2>
+      {!inConversation ? (
         <div className="card" style={{ textAlign: "center", padding: 30 }}>
           <p className="muted" style={{ margin: 0 }}>No questions yet.</p>
         </div>

@@ -12,7 +12,7 @@
 
 import { prisma } from "../prisma";
 import { brisbane } from "../time";
-import { answerQuestion } from "../anthropic";
+import { answerQuestion, type QaHistoryTurn } from "../anthropic";
 import { readLatestMetrics } from "./goals";
 
 interface AskInput {
@@ -23,8 +23,12 @@ interface AskInput {
    *  when the requesting user is in MARK_RESTRICTED_USERNAMES. */
   includeRestricted?: boolean;
   /** Optional PDF the user uploaded. Forwarded straight through to Anthropic
-   *  as a `document` content block. */
+   *  as a `document` content block. Attached to the first user message of
+   *  the conversation so it persists across follow-up turns. */
   pdf?: { filename: string; base64: string };
+  /** Prior conversation turns, oldest first. The Anthropic API is stateless
+   *  so the browser sends the full conversation on every follow-up. */
+  history?: QaHistoryTurn[];
 }
 
 export interface AskOutput {
@@ -81,6 +85,7 @@ export async function askMark(input: AskInput): Promise<AskOutput> {
     dataAsOf,
     data,
     pdf: input.pdf,
+    history: input.history,
   });
 
   // Audit log: if the user attached a PDF, record the filename in the question

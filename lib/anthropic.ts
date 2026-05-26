@@ -189,13 +189,24 @@ function fallbackSynthesis(input: SynthesiseBriefInput, why: string): SynthesisO
   return { headline, narrative, fromModel: false };
 }
 
+export interface QaHistoryTurn {
+  role: "user" | "assistant";
+  text: string;
+}
+
 interface QaInput {
   question: string;
   dataAsOf: string;
   data: unknown;
   /** Optional PDF the user uploaded. Anthropic API takes the bytes directly
-   *  as a `document` content block — no local pdf-parse. */
+   *  as a `document` content block — no local pdf-parse. The PDF is attached
+   *  to the FIRST user message of the conversation, so it persists in context
+   *  across follow-up turns. */
   pdf?: { filename: string; base64: string };
+  /** Prior conversation turns, oldest first. Each follow-up turn replays the
+   *  full conversation — the Anthropic API is stateless, so we send the whole
+   *  thing every time. */
+  history?: QaHistoryTurn[];
 }
 
 export interface QaOutput {
@@ -221,33 +232,52 @@ export async function answerQuestion(input: QaInput): Promise<QaOutput> {
         `If the document is outside JBC finance scope, say so honestly.\n\n`
       : "";
 
-    // Assemble user content. PDF (if any) goes first as a document block,
-    // then a text block with the question + structured data.
-    const userContent: Anthropic.Messages.ContentBlockParam[] = [];
-    if (input.pdf) {
-      userContent.push({
-        type: "document",
-        source: { type: "base64", media_type: "application/pdf", data: input.pdf.base64 },
-        title: input.pdf.filename,
-      });
+    // Build the full message history. PDF (if any) goes on the first user
+    // message — that's either history[0] or, if there's no history, the
+    // current question itself.
+    const messages: Anthropic.Messages.MessageParam[] = [];
+    let pdfPlaced = false;
+
+    function userContentBlocks(text: string, attachPdf: boolean): Anthropic.Messages.ContentBlockParam[] {
+      const blocks: Anthropic.Messages.ContentBlockParam[] = [];
+      if (attachPdf && input.pdf) {
+        blocks.push({
+          type: "document",
+          source: { type: "base64", media_type: "application/pdf", data: input.pdf.base64 },
+          title: input.pdf.filename,
+        });
+      }
+      blocks.push({ type: "text", text });
+      return blocks;
     }
-    userContent.push({
-      type: "text",
-      text:
-        `Question from a team member: ${input.question}\n\n` +
-        pdfNote +
-        `Data as of: ${input.dataAsOf}\n\n` +
-        `Structured data you may use to answer (only use figures present here — ` +
-        `if the answer is not in here, say so):\n` +
-        `${JSON.stringify(input.data)}\n\n` +
-        `Answer in plain English. End with: "Data as of ${input.dataAsOf}."`,
-    });
+
+    for (const turn of input.history ?? []) {
+      if (turn.role === "user") {
+        const attach = !pdfPlaced && Boolean(input.pdf);
+        messages.push({ role: "user", content: userContentBlocks(turn.text, attach) });
+        if (attach) pdfPlaced = true;
+      } else {
+        messages.push({ role: "assistant", content: turn.text });
+      }
+    }
+
+    const currentText =
+      `Question from a team member: ${input.question}\n\n` +
+      pdfNote +
+      `Data as of: ${input.dataAsOf}\n\n` +
+      `Structured data you may use to answer (only use figures present here — ` +
+      `if the answer is not in here, say so):\n` +
+      `${JSON.stringify(input.data)}\n\n` +
+      `Answer in plain English. End with: "Data as of ${input.dataAsOf}."`;
+
+    const attachCurrent = !pdfPlaced && Boolean(input.pdf);
+    messages.push({ role: "user", content: userContentBlocks(currentText, attachCurrent) });
 
     const resp = await c.messages.create({
       model: env.ANTHROPIC_MODEL,
       max_tokens: 1800,
       system: MARK_SYSTEM,
-      messages: [{ role: "user", content: userContent }],
+      messages,
     });
     const text = resp.content
       .filter((b): b is Anthropic.TextBlock => b.type === "text")
