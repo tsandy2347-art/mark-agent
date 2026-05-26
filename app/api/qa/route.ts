@@ -3,15 +3,18 @@
 // Body (application/json):
 //   {
 //     question:  string,                          // can be "" on the very first
-//                                                 // turn when a PDF is attached
+//                                                 // turn when PDFs are attached
 //                                                 // (we'll use a default prompt)
 //     history?:  Array<{ role: "user"|"assistant", text: string }>,
 //                                                 // prior turns, oldest first
+//     pdfs?:     Array<{ filename: string, base64: string }>,
+//                                                 // one or more attached docs;
+//                                                 // browser holds the base64
+//                                                 // across turns and re-sends
+//                                                 // (the Anthropic API is
+//                                                 // stateless).
 //     pdf?:      { filename: string, base64: string }
-//                                                 // browser reads the file once
-//                                                 // and re-sends the base64 on
-//                                                 // every follow-up turn — the
-//                                                 // Anthropic API is stateless.
+//                                                 // legacy alias for pdfs[0]
 //   }
 //
 // Caller's Basic-auth username is used as `askedBy` for the audit log.
@@ -23,21 +26,23 @@ import { NextResponse, type NextRequest } from "next/server";
 import { headers } from "next/headers";
 import { restrictedUsernames } from "@/lib/env";
 import { askMark } from "@/lib/mark/qa";
-import type { QaHistoryTurn } from "@/lib/anthropic";
+import type { QaHistoryTurn, QaPdf } from "@/lib/anthropic";
 
 export const dynamic = "force-dynamic";
 export const maxDuration = 120;
 
-const MAX_PDF_BYTES = 30 * 1024 * 1024; // 30 MB (Anthropic accepts up to 32)
-const MAX_HISTORY_TURNS = 40;          // cap the conversation we replay
-const MAX_BODY_CHARS = 60 * 1024 * 1024; // soft cap on incoming JSON
+const MAX_PDF_BYTES = 30 * 1024 * 1024;          // 30 MB per PDF (Anthropic accepts up to 32)
+const MAX_TOTAL_PDF_BYTES = 80 * 1024 * 1024;    // 80 MB total per request
+const MAX_HISTORY_TURNS = 40;                     // cap the conversation we replay
+const MAX_BODY_CHARS = 110 * 1024 * 1024;        // soft cap on incoming JSON
 
 const DEFAULT_PDF_QUESTION =
-  "I've attached a PDF. Read it carefully and tell me what you make of it. " +
-  "Surface anything that's relevant to JBC finance — risks, opportunities, " +
-  "things that contradict the data the specialists have already reported, " +
-  "anything worth a human's attention. Same rules: only use figures actually " +
-  "in the document or the data — don't invent.";
+  "I've attached PDFs. Read them carefully and tell me what you make of them. " +
+  "Surface anything relevant to JBC finance — risks, opportunities, things " +
+  "that contradict the data the specialists have already reported, anything " +
+  "worth a human's attention. When quoting a figure or claim, name the file " +
+  "it came from. Same rules: only use figures actually in the documents or " +
+  "the data — don't invent.";
 
 async function currentUsername(): Promise<string | null> {
   const h = await headers();
@@ -70,27 +75,54 @@ function parseHistory(raw: unknown): QaHistoryTurn[] {
   return out;
 }
 
-function parsePdf(raw: unknown):
-  | { ok: true; pdf: { filename: string; base64: string } | undefined }
+function approxBytesFromBase64(s: string): number {
+  return Math.floor((s.length * 3) / 4);
+}
+
+function parseOnePdf(raw: unknown):
+  | { ok: true; pdf: QaPdf }
   | { ok: false; error: string } {
-  if (raw == null) return { ok: true, pdf: undefined };
-  if (typeof raw !== "object") return { ok: false, error: "pdf must be an object" };
+  if (typeof raw !== "object" || raw == null) {
+    return { ok: false, error: "pdf entry must be an object" };
+  }
   const r = raw as { filename?: unknown; base64?: unknown };
   if (typeof r.filename !== "string" || typeof r.base64 !== "string") {
-    return { ok: false, error: "pdf needs { filename, base64 }" };
+    return { ok: false, error: "pdf entry needs { filename, base64 }" };
   }
-  // Rough size check: base64 ≈ bytes * 4 / 3
-  const approxBytes = Math.floor((r.base64.length * 3) / 4);
-  if (approxBytes > MAX_PDF_BYTES) {
+  const approx = approxBytesFromBase64(r.base64);
+  if (approx > MAX_PDF_BYTES) {
     return {
       ok: false,
-      error: `PDF too large (~${(approxBytes / 1_048_576).toFixed(1)} MB, max 30 MB)`,
+      error: `PDF "${r.filename}" too large (~${(approx / 1_048_576).toFixed(1)} MB, max 30 MB per file)`,
     };
   }
-  return {
-    ok: true,
-    pdf: { filename: r.filename.slice(0, 200), base64: r.base64 },
-  };
+  return { ok: true, pdf: { filename: r.filename.slice(0, 200), base64: r.base64 } };
+}
+
+function parsePdfs(rawPdfs: unknown, rawPdf: unknown):
+  | { ok: true; pdfs: QaPdf[] }
+  | { ok: false; error: string } {
+  const entries: unknown[] = Array.isArray(rawPdfs)
+    ? rawPdfs
+    : rawPdf != null
+      ? [rawPdf]
+      : [];
+  if (entries.length === 0) return { ok: true, pdfs: [] };
+  const out: QaPdf[] = [];
+  let totalApprox = 0;
+  for (const e of entries) {
+    const r = parseOnePdf(e);
+    if (!r.ok) return r;
+    out.push(r.pdf);
+    totalApprox += approxBytesFromBase64(r.pdf.base64);
+    if (totalApprox > MAX_TOTAL_PDF_BYTES) {
+      return {
+        ok: false,
+        error: `Attached PDFs total ${(totalApprox / 1_048_576).toFixed(1)} MB — max ${(MAX_TOTAL_PDF_BYTES / 1_048_576).toFixed(0)} MB per request`,
+      };
+    }
+  }
+  return { ok: true, pdfs: out };
 }
 
 export async function POST(req: NextRequest) {
@@ -103,29 +135,30 @@ export async function POST(req: NextRequest) {
   const body = (await req.json().catch(() => ({}))) as {
     question?: unknown;
     history?: unknown;
+    pdfs?: unknown;
     pdf?: unknown;
   };
 
   const q = typeof body.question === "string" ? body.question.trim() : "";
   const history = parseHistory(body.history);
-  const pdfRes = parsePdf(body.pdf);
+  const pdfRes = parsePdfs(body.pdfs, body.pdf);
   if (!pdfRes.ok) {
     return NextResponse.json({ ok: false, error: pdfRes.error }, { status: 400 });
   }
-  const pdf = pdfRes.pdf;
+  const pdfs = pdfRes.pdfs;
 
-  if (!q && !pdf && history.length === 0) {
+  if (!q && pdfs.length === 0 && history.length === 0) {
     return NextResponse.json(
       { ok: false, error: "question, file, or history required" },
       { status: 400 },
     );
   }
 
-  // First turn with a PDF and no question → use the default prompt.
+  // First turn with PDFs and no question → use the default prompt.
   // On follow-up turns, an empty question is an error.
   let effectiveQ = q;
   if (!effectiveQ) {
-    if (history.length === 0 && pdf) {
+    if (history.length === 0 && pdfs.length > 0) {
       effectiveQ = DEFAULT_PDF_QUESTION;
     } else {
       return NextResponse.json(
@@ -141,7 +174,7 @@ export async function POST(req: NextRequest) {
     askedBy: me,
     question: effectiveQ,
     includeRestricted: canSeeRestricted,
-    pdf,
+    pdfs,
     history,
   });
   return NextResponse.json({ ok: true, ...out });

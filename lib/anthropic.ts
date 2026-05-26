@@ -194,15 +194,20 @@ export interface QaHistoryTurn {
   text: string;
 }
 
+export interface QaPdf {
+  filename: string;
+  base64: string;
+}
+
 interface QaInput {
   question: string;
   dataAsOf: string;
   data: unknown;
-  /** Optional PDF the user uploaded. Anthropic API takes the bytes directly
-   *  as a `document` content block — no local pdf-parse. The PDF is attached
-   *  to the FIRST user message of the conversation, so it persists in context
+  /** Optional PDFs the user uploaded. Anthropic API takes the bytes directly
+   *  as `document` content blocks — no local pdf-parse. All PDFs are attached
+   *  to the FIRST user message of the conversation, so they persist in context
    *  across follow-up turns. */
-  pdf?: { filename: string; base64: string };
+  pdfs?: QaPdf[];
   /** Prior conversation turns, oldest first. Each follow-up turn replays the
    *  full conversation — the Anthropic API is stateless, so we send the whole
    *  thing every time. */
@@ -225,27 +230,34 @@ export async function answerQuestion(input: QaInput): Promise<QaOutput> {
     };
   }
   try {
-    const pdfNote = input.pdf
-      ? `The user has ATTACHED a PDF named "${input.pdf.filename}" — read it carefully. ` +
-        `Reason about its contents alongside the JBC finance data below. Same rules apply: ` +
-        `only use figures that actually appear in the PDF or the data — do not invent. ` +
-        `If the document is outside JBC finance scope, say so honestly.\n\n`
-      : "";
+    const pdfs = input.pdfs ?? [];
+    const pdfNote =
+      pdfs.length > 0
+        ? `The user has ATTACHED ${pdfs.length} PDF${pdfs.length === 1 ? "" : "s"}: ` +
+          pdfs.map((p) => `"${p.filename}"`).join(", ") +
+          `. Read each one carefully. Reason about their contents alongside the JBC ` +
+          `finance data below. Same rules apply: only use figures that actually appear ` +
+          `in the PDFs or the data — do not invent. If a document is outside JBC ` +
+          `finance scope, say so honestly. When referring to a figure or quote from ` +
+          `a PDF, name the file it came from so the reader can trace it.\n\n`
+        : "";
 
-    // Build the full message history. PDF (if any) goes on the first user
+    // Build the full message history. PDFs (if any) all go on the first user
     // message — that's either history[0] or, if there's no history, the
     // current question itself.
     const messages: Anthropic.Messages.MessageParam[] = [];
     let pdfPlaced = false;
 
-    function userContentBlocks(text: string, attachPdf: boolean): Anthropic.Messages.ContentBlockParam[] {
+    function userContentBlocks(text: string, attachPdfs: boolean): Anthropic.Messages.ContentBlockParam[] {
       const blocks: Anthropic.Messages.ContentBlockParam[] = [];
-      if (attachPdf && input.pdf) {
-        blocks.push({
-          type: "document",
-          source: { type: "base64", media_type: "application/pdf", data: input.pdf.base64 },
-          title: input.pdf.filename,
-        });
+      if (attachPdfs) {
+        for (const p of pdfs) {
+          blocks.push({
+            type: "document",
+            source: { type: "base64", media_type: "application/pdf", data: p.base64 },
+            title: p.filename,
+          });
+        }
       }
       blocks.push({ type: "text", text });
       return blocks;
@@ -253,7 +265,7 @@ export async function answerQuestion(input: QaInput): Promise<QaOutput> {
 
     for (const turn of input.history ?? []) {
       if (turn.role === "user") {
-        const attach = !pdfPlaced && Boolean(input.pdf);
+        const attach = !pdfPlaced && pdfs.length > 0;
         messages.push({ role: "user", content: userContentBlocks(turn.text, attach) });
         if (attach) pdfPlaced = true;
       } else {
@@ -270,7 +282,7 @@ export async function answerQuestion(input: QaInput): Promise<QaOutput> {
       `${JSON.stringify(input.data)}\n\n` +
       `Answer in plain English. End with: "Data as of ${input.dataAsOf}."`;
 
-    const attachCurrent = !pdfPlaced && Boolean(input.pdf);
+    const attachCurrent = !pdfPlaced && pdfs.length > 0;
     messages.push({ role: "user", content: userContentBlocks(currentText, attachCurrent) });
 
     const resp = await c.messages.create({
