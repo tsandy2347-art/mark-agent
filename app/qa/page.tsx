@@ -19,7 +19,32 @@
 
 "use client";
 
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
+
+const SESSION_STORAGE_KEY = "mark-qa-session-id";
+
+function newSessionId(): string {
+  // Mirror the server format so the server doesn't re-mint a different id
+  // on the first turn. Path-safe characters only.
+  return `mark-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
+}
+
+function loadSessionId(): string {
+  if (typeof window === "undefined") return newSessionId();
+  try {
+    const existing = window.localStorage.getItem(SESSION_STORAGE_KEY);
+    if (existing && /^[A-Za-z0-9_-]{8,64}$/.test(existing)) return existing;
+  } catch {
+    // localStorage may be unavailable in some privacy modes — fall through.
+  }
+  const fresh = newSessionId();
+  try {
+    window.localStorage.setItem(SESSION_STORAGE_KEY, fresh);
+  } catch {
+    /* noop */
+  }
+  return fresh;
+}
 
 interface Turn {
   question: string;
@@ -146,7 +171,60 @@ export default function QaPage() {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [flash, setFlash] = useState<string | null>(null);
+  const [sessionId, setSessionId] = useState<string>("");
+  const [memoryStatus, setMemoryStatus] = useState<"loading" | "ready" | "disabled" | "errored">("loading");
   const fileInputRef = useRef<HTMLInputElement | null>(null);
+
+  // Boot the session: resolve sessionId from localStorage (or mint a new one),
+  // then fetch the recorded turns from Honcho so the conversation rehydrates
+  // when the user returns. Fail-soft — if Honcho is unreachable we still let
+  // them chat, just without memory.
+  useEffect(() => {
+    const id = loadSessionId();
+    setSessionId(id);
+    let cancelled = false;
+    (async () => {
+      try {
+        const res = await fetch(`/api/qa/history?sessionId=${encodeURIComponent(id)}`);
+        if (!res.ok) {
+          setMemoryStatus("errored");
+          return;
+        }
+        const json = await res.json();
+        if (cancelled) return;
+        if (json.disabled) {
+          setMemoryStatus("disabled");
+          return;
+        }
+        setMemoryStatus(json.errored ? "errored" : "ready");
+        // Honcho stores messages one at a time (user, assistant, user, assistant…)
+        // — pair them back into Q/A turns for the chat UI.
+        const rawTurns: Array<{ role: "user" | "assistant"; text: string; createdAt?: string | null }> =
+          Array.isArray(json.turns) ? json.turns : [];
+        const paired: Turn[] = [];
+        for (let i = 0; i < rawTurns.length; i++) {
+          const t = rawTurns[i];
+          if (t.role === "user") {
+            const next = rawTurns[i + 1];
+            if (next && next.role === "assistant") {
+              paired.push({
+                question: t.text,
+                answer: next.text,
+                dataAsOf: next.createdAt ?? "(restored from memory)",
+              });
+              i++; // skip the assistant turn we just paired
+            }
+          }
+        }
+        setTurns(paired);
+      } catch {
+        if (!cancelled) setMemoryStatus("errored");
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   function pickFile() {
     fileInputRef.current?.click();
@@ -252,6 +330,17 @@ export default function QaPage() {
     setQuestion("");
     setError(null);
     if (fileInputRef.current) fileInputRef.current.value = "";
+    // Mint a brand-new Honcho session so the cleared chat doesn't share a
+    // thread with what was there before. The OLD session id is left intact
+    // in Honcho — its history is preserved for the cross-session deriver to
+    // learn from, just not surfaced in this fresh thread.
+    const fresh = newSessionId();
+    setSessionId(fresh);
+    try {
+      window.localStorage.setItem(SESSION_STORAGE_KEY, fresh);
+    } catch {
+      /* noop */
+    }
   }
 
   async function ask() {
@@ -277,6 +366,9 @@ export default function QaPage() {
           base64: a.base64,
         }));
       }
+      if (sessionId) {
+        payload.sessionId = sessionId;
+      }
       const res = await fetch("/api/qa", {
         method: "POST",
         headers: { "content-type": "application/json" },
@@ -285,6 +377,20 @@ export default function QaPage() {
       const json = await res.json();
       if (!res.ok || !json.ok) {
         throw new Error(json.error ?? `HTTP ${res.status}`);
+      }
+      // Echo back: server may have minted a sessionId; if so, sync.
+      if (typeof json.sessionId === "string" && json.sessionId && json.sessionId !== sessionId) {
+        setSessionId(json.sessionId);
+        try {
+          window.localStorage.setItem(SESSION_STORAGE_KEY, json.sessionId);
+        } catch {
+          /* noop */
+        }
+      }
+      if (json.memory && typeof json.memory === "object") {
+        if (json.memory.disabled) setMemoryStatus("disabled");
+        else if (json.memory.errored) setMemoryStatus("errored");
+        else setMemoryStatus("ready");
       }
       const turnQuestion =
         q ||
@@ -322,6 +428,12 @@ export default function QaPage() {
         directly into the box below. Attachments stay in the conversation across
         follow-up turns until you remove them. Same rules: Mark never invents
         figures; if he can't answer from what's in front of him, he says so.
+      </p>
+      <p className="muted" style={{ fontSize: 12, marginTop: -8 }}>
+        {memoryStatus === "loading" ? "🧠 Loading memory…" : null}
+        {memoryStatus === "ready" ? `🧠 Memory on — Mark remembers your past conversations (via Honcho). Session ${sessionId.slice(0, 18)}…` : null}
+        {memoryStatus === "disabled" ? "🧠 Memory layer not configured — this session won't persist." : null}
+        {memoryStatus === "errored" ? "🧠 Memory layer unreachable — Mark answers without recall this session." : null}
       </p>
 
       <div className="card" style={{ marginTop: 12 }}>

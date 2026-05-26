@@ -204,6 +204,7 @@ export async function POST(req: NextRequest) {
     attachments?: unknown;
     pdfs?: unknown;
     pdf?: unknown;
+    sessionId?: unknown;
   };
 
   const q = typeof body.question === "string" ? body.question.trim() : "";
@@ -213,6 +214,21 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ ok: false, error: attRes.error }, { status: 400 });
   }
   const attachments = attRes.attachments;
+
+  // Session id is the Honcho thread handle. Browser holds it in localStorage;
+  // when absent we mint one server-side and echo it back so the browser can
+  // persist it from the very first turn. Strictly-validated cuid-style chars
+  // only — the value is used as a URL path component.
+  let sessionId = typeof body.sessionId === "string" ? body.sessionId.trim() : "";
+  if (sessionId && !/^[A-Za-z0-9_-]{8,64}$/.test(sessionId)) {
+    return NextResponse.json(
+      { ok: false, error: "sessionId must be 8-64 chars, alphanumeric / _ / - only" },
+      { status: 400 },
+    );
+  }
+  if (!sessionId) {
+    sessionId = `mark-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
+  }
 
   if (!q && attachments.length === 0 && history.length === 0) {
     return NextResponse.json(
@@ -243,6 +259,7 @@ export async function POST(req: NextRequest) {
     includeRestricted: canSeeRestricted,
     attachments,
     history,
+    sessionId,
   });
   return NextResponse.json({ ok: true, ...out });
 }

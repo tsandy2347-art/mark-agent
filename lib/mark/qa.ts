@@ -13,6 +13,8 @@
 import { prisma } from "../prisma";
 import { brisbane } from "../time";
 import { answerQuestion, type QaAttachment, type QaHistoryTurn } from "../anthropic";
+import { env } from "../env";
+import { fetchMarkMemory, formatMemoryAddendum, postTurn } from "../honcho";
 import { readLatestMetrics } from "./goals";
 
 interface AskInput {
@@ -30,20 +32,33 @@ interface AskInput {
   /** Prior conversation turns, oldest first. The Anthropic API is stateless
    *  so the browser sends the full conversation on every follow-up. */
   history?: QaHistoryTurn[];
+  /** Honcho session id — one continuous thread per user. Stored in browser
+   *  localStorage; "Clear conversation" mints a new one. When supplied,
+   *  Mark fetches the session resume + per-user cross-session memory from
+   *  Honcho, and writes the new user/assistant turns back. Omit to skip
+   *  memory entirely (useful for ad-hoc API calls). */
+  sessionId?: string;
 }
 
 export interface AskOutput {
   answer: string;
   dataAsOf: string;
   queryId: string;
+  /** Echoed back so the browser knows which session this turn landed in
+   *  (useful when the server mints a new session id). */
+  sessionId: string | null;
+  /** Diagnostics for the UI: was the memory layer disabled or errored
+   *  this turn? */
+  memory: { disabled: boolean; errored: boolean };
 }
 
 export async function askMark(input: AskInput): Promise<AskOutput> {
   const includeRestricted = Boolean(input.includeRestricted);
   const now = new Date();
   const dataAsOf = brisbane(now);
+  const userPeer = input.askedBy || "anonymous";
 
-  const [findings, metrics, statuses] = await Promise.all([
+  const [findings, metrics, statuses, memory] = await Promise.all([
     prisma.ingestedFinding.findMany({
       where: {
         resolved: false,
@@ -54,6 +69,9 @@ export async function askMark(input: AskInput): Promise<AskOutput> {
     }),
     readLatestMetrics(),
     prisma.specialistRunStatus.findMany(),
+    input.sessionId
+      ? fetchMarkMemory({ sessionId: input.sessionId, userPeer })
+      : Promise.resolve({ resume: [], memoryBlock: null, disabled: !env.HONCHO_BASE_URL, errored: false }),
   ]);
 
   // Compact the findings to a shape that's cheap to put in the context window
@@ -87,6 +105,7 @@ export async function askMark(input: AskInput): Promise<AskOutput> {
     data,
     attachments: input.attachments,
     history: input.history,
+    memoryAddendum: formatMemoryAddendum(memory),
   });
 
   // Audit log: if the user attached files, record the filenames in the
@@ -105,5 +124,29 @@ export async function askMark(input: AskInput): Promise<AskOutput> {
       dataAsOf: now,
     },
   });
-  return { answer, dataAsOf, queryId: row.id };
+
+  // Persist the turn to Honcho (best-effort; doesn't block the response).
+  // Both messages get posted so the deriver builds an accurate transcript.
+  if (input.sessionId) {
+    await Promise.all([
+      postTurn({
+        sessionId: input.sessionId,
+        peerId: userPeer,
+        content: auditQuestion,
+      }),
+      postTurn({
+        sessionId: input.sessionId,
+        peerId: env.HONCHO_MARK_PEER,
+        content: answer,
+      }),
+    ]);
+  }
+
+  return {
+    answer,
+    dataAsOf,
+    queryId: row.id,
+    sessionId: input.sessionId ?? null,
+    memory: { disabled: memory.disabled, errored: memory.errored },
+  };
 }

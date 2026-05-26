@@ -258,6 +258,10 @@ interface QaInput {
    *  full conversation — the Anthropic API is stateless, so we send the whole
    *  thing every time. */
   history?: QaHistoryTurn[];
+  /** Optional system-prompt addendum, typically from the Honcho memory layer
+   *  (cross-session facts about the asking user). Appended to the static
+   *  MARK_SYSTEM prompt for this turn only. Empty / undefined = ignored. */
+  memoryAddendum?: string;
 }
 
 const IMAGE_MIME_TYPES = new Set([
@@ -470,10 +474,14 @@ export async function answerQuestion(input: QaInput): Promise<QaOutput> {
     const attachCurrent = !attachmentsPlaced && totalCount > 0;
     messages.push({ role: "user", content: userContentBlocks(currentText, attachCurrent) });
 
+    const systemPrompt = input.memoryAddendum && input.memoryAddendum.trim()
+      ? `${MARK_SYSTEM}\n${input.memoryAddendum}`
+      : MARK_SYSTEM;
+
     const resp = await c.messages.create({
       model: env.ANTHROPIC_MODEL,
       max_tokens: 1800,
-      system: MARK_SYSTEM,
+      system: systemPrompt,
       messages,
     });
     const text = resp.content

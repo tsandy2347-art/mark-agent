@@ -91,6 +91,19 @@ const schema = z.object({
   // ── Cron auth ────────────────────────────────────────────────────
   CRON_SECRET: z.string().optional().default(""),
 
+  // ── Honcho memory layer (self-host, shared with Adam) ───────────
+  /** Honcho base URL — same instance every JBC agent points at. */
+  HONCHO_BASE_URL: z.string().optional().default(""),
+  /** Honcho JWT — admin-scoped, lets Mark read peer.context + write messages. */
+  HONCHO_JWT: z.string().optional().default(""),
+  /** Honcho workspace. Default matches the Jarvis-wide workspace. */
+  HONCHO_WORKSPACE: z.string().default("jbc-jarvis"),
+  /** Mark's peer name inside the workspace. Adam = "adam". */
+  HONCHO_MARK_PEER: z.string().default("mark"),
+  /** Network timeout for Honcho calls — never block Mark on a memory layer
+   *  hiccup. Adam's pattern; same here. */
+  HONCHO_TIMEOUT_MS: z.coerce.number().int().default(4000),
+
   // ── Mock mode ────────────────────────────────────────────────────
   /** When on, Mark never calls a specialist — he uses canned fixtures so
    *  the whole brief pipeline is exercisable without the team being up. */
