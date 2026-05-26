@@ -60,7 +60,11 @@ export function proxy(req: NextRequest) {
   return new NextResponse("Authentication required", {
     status: 401,
     headers: {
-      "WWW-Authenticate": 'Basic realm="Mark — JBC Finance Manager", charset="UTF-8"',
+      // NOTE: every char in the realm string MUST be ASCII (0-255). The Headers
+      // Web API enforces ByteString here — a U+2014 em-dash or similar Unicode
+      // will throw "Cannot convert argument to a ByteString" and we'll return
+      // 500 instead of 401. Use plain hyphens.
+      "WWW-Authenticate": 'Basic realm="Mark - JBC Finance Manager", charset="UTF-8"',
     },
   });
 }
