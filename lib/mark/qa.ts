@@ -22,6 +22,9 @@ interface AskInput {
    *  Defaults to false. The route layer is responsible for setting this only
    *  when the requesting user is in MARK_RESTRICTED_USERNAMES. */
   includeRestricted?: boolean;
+  /** Optional PDF the user uploaded. Forwarded straight through to Anthropic
+   *  as a `document` content block. */
+  pdf?: { filename: string; base64: string };
 }
 
 export interface AskOutput {
@@ -73,12 +76,24 @@ export async function askMark(input: AskInput): Promise<AskOutput> {
     })),
   };
 
-  const { answer } = await answerQuestion({ question: input.question, dataAsOf, data });
+  const { answer } = await answerQuestion({
+    question: input.question,
+    dataAsOf,
+    data,
+    pdf: input.pdf,
+  });
+
+  // Audit log: if the user attached a PDF, record the filename in the question
+  // text so FinanceQuery shows "[PDF: foo.pdf] What do you think?" instead of
+  // a bare question with no trace of the attachment.
+  const auditQuestion = input.pdf
+    ? `[PDF attached: ${input.pdf.filename}] ${input.question}`
+    : input.question;
 
   const row = await prisma.financeQuery.create({
     data: {
       askedBy: input.askedBy,
-      question: input.question,
+      question: auditQuestion,
       answer,
       dataAsOf: now,
     },

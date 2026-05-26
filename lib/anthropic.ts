@@ -193,6 +193,9 @@ interface QaInput {
   question: string;
   dataAsOf: string;
   data: unknown;
+  /** Optional PDF the user uploaded. Anthropic API takes the bytes directly
+   *  as a `document` content block — no local pdf-parse. */
+  pdf?: { filename: string; base64: string };
 }
 
 export interface QaOutput {
@@ -211,22 +214,40 @@ export async function answerQuestion(input: QaInput): Promise<QaOutput> {
     };
   }
   try {
+    const pdfNote = input.pdf
+      ? `The user has ATTACHED a PDF named "${input.pdf.filename}" — read it carefully. ` +
+        `Reason about its contents alongside the JBC finance data below. Same rules apply: ` +
+        `only use figures that actually appear in the PDF or the data — do not invent. ` +
+        `If the document is outside JBC finance scope, say so honestly.\n\n`
+      : "";
+
+    // Assemble user content. PDF (if any) goes first as a document block,
+    // then a text block with the question + structured data.
+    const userContent: Anthropic.Messages.ContentBlockParam[] = [];
+    if (input.pdf) {
+      userContent.push({
+        type: "document",
+        source: { type: "base64", media_type: "application/pdf", data: input.pdf.base64 },
+        title: input.pdf.filename,
+      });
+    }
+    userContent.push({
+      type: "text",
+      text:
+        `Question from a team member: ${input.question}\n\n` +
+        pdfNote +
+        `Data as of: ${input.dataAsOf}\n\n` +
+        `Structured data you may use to answer (only use figures present here — ` +
+        `if the answer is not in here, say so):\n` +
+        `${JSON.stringify(input.data)}\n\n` +
+        `Answer in plain English. End with: "Data as of ${input.dataAsOf}."`,
+    });
+
     const resp = await c.messages.create({
       model: env.ANTHROPIC_MODEL,
-      max_tokens: 1200,
+      max_tokens: 1800,
       system: MARK_SYSTEM,
-      messages: [
-        {
-          role: "user",
-          content:
-            `Question from a team member: ${input.question}\n\n` +
-            `Data as of: ${input.dataAsOf}\n\n` +
-            `Structured data you may use to answer (only use figures present here — ` +
-            `if the answer is not in here, say so):\n` +
-            `${JSON.stringify(input.data)}\n\n` +
-            `Answer in plain English. End with: "Data as of ${input.dataAsOf}."`,
-        },
-      ],
+      messages: [{ role: "user", content: userContent }],
     });
     const text = resp.content
       .filter((b): b is Anthropic.TextBlock => b.type === "text")
