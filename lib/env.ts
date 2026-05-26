@@ -1,0 +1,159 @@
+// Centralised env access. Mark consumes every config knob through here.
+//
+// Mark is an orchestrator: he reads 7 specialists, synthesises, escalates.
+// He never holds source-system creds (no Xero, no MYOB, no bank, no ATO).
+// He holds specialist URLs + the shared HUB_API_KEY he uses to read them.
+
+import { z } from "zod";
+
+const schema = z.object({
+  DATABASE_URL: z.string().min(1),
+
+  // ── Auth (human-facing pages) ────────────────────────────────────
+  // Single-user: BASIC_AUTH_USER + BASIC_AUTH_PASS
+  // Multi-user:  BASIC_AUTH_USERS=tony:pwA,lindsay:pwB,nicole:pwC
+  BASIC_AUTH_USER: z.string().optional().default(""),
+  BASIC_AUTH_PASS: z.string().optional().default(""),
+  BASIC_AUTH_USERS: z.string().optional().default(""),
+
+  /** General admin users — they see /goals, /qa, /specialists in full. */
+  ADMIN_USERNAMES: z.string().default("tony"),
+
+  /** Restricted users — they alone see /restricted (people + individual pay).
+   *  Default per spec section 2.5 + report routing: Tony + Lindsay (people) +
+   *  Nicole (pay). Mark gates the route by Basic-auth username. */
+  MARK_RESTRICTED_USERNAMES: z.string().default("tony,lindsay,nicole"),
+
+  // ── Specialist endpoints (one base URL per agent) ────────────────
+  // Mark calls ${URL}/api/findings with Authorization: Bearer ${HUB_API_KEY}.
+  // Leave a URL blank to disable polling for that specialist (marks it stale).
+  SPECIALIST_RECONCILIATION_URL: z.string().optional().default(""),
+  SPECIALIST_CONTROLS_AUDIT_URL: z.string().optional().default(""),
+  SPECIALIST_PAYROLL_LABOUR_URL: z.string().optional().default(""),
+  SPECIALIST_PAYABLES_URL: z.string().optional().default(""),
+  SPECIALIST_REVENUE_CLAIMS_URL: z.string().optional().default(""),
+  SPECIALIST_RECEIVABLES_URL: z.string().optional().default(""),
+  SPECIALIST_TAX_COMPLIANCE_URL: z.string().optional().default(""),
+
+  /** Shared Bearer key Mark presents to every specialist's /api/findings.
+   *  In production the same value lives on Mark + all 7 specialists. */
+  HUB_API_KEY: z.string().optional().default(""),
+
+  // ── Anthropic ────────────────────────────────────────────────────
+  ANTHROPIC_API_KEY: z.string().optional().default(""),
+  ANTHROPIC_MODEL: z.string().default("claude-sonnet-4-6"),
+
+  // ── Cadence (Brisbane local) — spec section 7 ────────────────────
+  /** HH:mm the daily brief is sent. Default 07:00. The cron sidecar fires
+   *  POST /api/cron/brief at the matching UTC time. */
+  MARK_DAILY_BRIEF_TIME: z.string().default("07:00"),
+  /** Day-of-week (1=Mon..7=Sun) the weekly report is sent. Default Monday. */
+  MARK_WEEKLY_REPORT_DAY: z.coerce.number().int().min(1).max(7).default(1),
+  /** Day-of-month the monthly pack is sent. Default 3rd (gives close some air). */
+  MARK_MONTHLY_PACK_DAY: z.coerce.number().int().min(1).max(28).default(3),
+  /** A specialist not run successfully inside this window is "stale" — that
+   *  staleness becomes its own brief item. */
+  MARK_SPECIALIST_STALE_HOURS: z.coerce.number().int().default(36),
+
+  // ── Report routing — spec section 6 ──────────────────────────────
+  /** Daily finance brief — Tony + Nicole. NEVER receives people / pay data. */
+  MARK_DAILY_RECIPIENTS: z.string().default(""),
+  /** Restricted brief — Tony + Lindsay (people) and/or Nicole (pay). Only
+   *  fires when there's something restricted. */
+  MARK_RESTRICTED_RECIPIENTS: z.string().default(""),
+  /** Weekly team report — Tony + section-owning managers. Aggregate figures
+   *  only, no individual data. */
+  MARK_WEEKLY_RECIPIENTS: z.string().default(""),
+  /** Monthly pack — Tony + external accountant. */
+  MARK_MONTHLY_RECIPIENTS: z.string().default(""),
+  /** Heartbeat failure — Tony only. Silent watchdog = broken watchdog. */
+  MARK_HEARTBEAT_RECIPIENTS: z.string().default(""),
+
+  // ── Goal targets — spec section 7 ────────────────────────────────
+  /** The headline. Tony's $3M profit target. */
+  GOAL_PROFIT_TARGET_AUD: z.coerce.number().default(3_000_000),
+  /** Per-entity labour cost % targets — CONFIRM with Tony. */
+  GOAL_LABOUR_COST_TARGET_PCT_SC: z.coerce.number().default(72),
+  GOAL_LABOUR_COST_TARGET_PCT_CQ: z.coerce.number().default(72),
+  /** DSO (days sales outstanding) target. */
+  GOAL_DSO_TARGET_DAYS: z.coerce.number().default(35),
+
+  // ── Q&A channel — spec section 4 (Function E) CONFIRM ────────────
+  /** "dashboard-chat" (default — uses the /qa page) or "helpdesk" (future). */
+  MARK_QA_CHANNEL: z.string().default("dashboard-chat"),
+
+  // ── Email plumbing ───────────────────────────────────────────────
+  REPORT_FROM: z.string().default("mark@justbettercareqld.com.au"),
+  AWS_REGION: z.string().default("ap-southeast-2"),
+  AWS_ACCESS_KEY_ID: z.string().optional().default(""),
+  AWS_SECRET_ACCESS_KEY: z.string().optional().default(""),
+
+  // ── Cron auth ────────────────────────────────────────────────────
+  CRON_SECRET: z.string().optional().default(""),
+
+  // ── Mock mode ────────────────────────────────────────────────────
+  /** When on, Mark never calls a specialist — he uses canned fixtures so
+   *  the whole brief pipeline is exercisable without the team being up. */
+  MARK_MOCK: z
+    .string()
+    .optional()
+    .default("")
+    .transform((s) => s.toLowerCase() === "true" || s === "1"),
+
+  NODE_ENV: z.enum(["development", "test", "production"]).default("development"),
+});
+
+export const env = schema.parse(process.env);
+
+export function recipients(list: string): string[] {
+  return list.split(",").map((s) => s.trim()).filter(Boolean);
+}
+
+export function adminUsernames(): string[] {
+  return env.ADMIN_USERNAMES.split(",").map((s) => s.trim().toLowerCase()).filter(Boolean);
+}
+
+export function restrictedUsernames(): string[] {
+  return env.MARK_RESTRICTED_USERNAMES.split(",").map((s) => s.trim().toLowerCase()).filter(Boolean);
+}
+
+/** Canonical list of Mark's 7 specialists + their base URLs.
+ *  A URL that's blank means "not yet wired" — `pollSpecialist` records that as
+ *  status="failed" with lastError="no SPECIALIST_*_URL configured" so it
+ *  surfaces in the brief, the way a broken pipe should. */
+export interface SpecialistDescriptor {
+  agent: SpecialistAgent;
+  label: string;
+  url: string;
+}
+
+export type SpecialistAgent =
+  | "reconciliation"
+  | "controls-audit"
+  | "payroll-labour"
+  | "payables"
+  | "revenue-claims"
+  | "receivables"
+  | "tax-compliance";
+
+export const SPECIALIST_AGENTS: SpecialistAgent[] = [
+  "reconciliation",
+  "controls-audit",
+  "payroll-labour",
+  "payables",
+  "revenue-claims",
+  "receivables",
+  "tax-compliance",
+];
+
+export function specialists(): SpecialistDescriptor[] {
+  return [
+    { agent: "reconciliation",  label: "Reconciliation",   url: env.SPECIALIST_RECONCILIATION_URL },
+    { agent: "controls-audit",  label: "Controls & Audit", url: env.SPECIALIST_CONTROLS_AUDIT_URL },
+    { agent: "payroll-labour",  label: "Payroll & Labour", url: env.SPECIALIST_PAYROLL_LABOUR_URL },
+    { agent: "payables",        label: "Payables",         url: env.SPECIALIST_PAYABLES_URL },
+    { agent: "revenue-claims",  label: "Revenue & Claims", url: env.SPECIALIST_REVENUE_CLAIMS_URL },
+    { agent: "receivables",     label: "Receivables",      url: env.SPECIALIST_RECEIVABLES_URL },
+    { agent: "tax-compliance",  label: "Tax & Compliance", url: env.SPECIALIST_TAX_COMPLIANCE_URL },
+  ];
+}

@@ -1,0 +1,24 @@
+[build]
+builder = "DOCKERFILE"
+dockerfilePath = "Dockerfile"
+
+[deploy]
+# Default schedule: poll specialists every 30 min. Mark's daily / weekly /
+# monthly brief schedules live on ADDITIONAL Railway cron services Tony
+# stands up in the dashboard (one cron service per schedule per Railway's
+# single-schedule-per-service constraint). Each one points the same
+# ping.sh at the appropriate MARK_URL endpoint via env (MARK_ACTION).
+#
+# Defaults assumed when standing up siblings:
+#   - poll      : every 30 minutes              `*/30 * * * *`            MARK_ACTION=poll
+#   - daily     : 07:00 AEST = 21:00 UTC        `0 21 * * *`              MARK_ACTION=brief MARK_BRIEF_TYPE=daily
+#                 (the daily run also implicitly triggers a restricted
+#                  build inside the app, but a second cron with
+#                  MARK_BRIEF_TYPE=restricted gives belt-and-braces)
+#   - weekly    : 07:30 AEST Monday = 21:30 UTC Sunday  `30 21 * * 0`     MARK_ACTION=brief MARK_BRIEF_TYPE=weekly
+#   - monthly   : 08:00 AEST on the 3rd = 22:00 UTC on the 2nd  `0 22 2 * *`  MARK_ACTION=brief MARK_BRIEF_TYPE=monthly
+#
+# Documented in CONFIRMS.md — adjust to match MARK_DAILY_BRIEF_TIME /
+# MARK_WEEKLY_REPORT_DAY / MARK_MONTHLY_PACK_DAY once Tony picks the times.
+cronSchedule = "*/30 * * * *"
+restartPolicyType = "NEVER"

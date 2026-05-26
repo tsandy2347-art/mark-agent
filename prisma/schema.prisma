@@ -1,0 +1,203 @@
+// ───────────────────────────────────────────────────────────────────
+// Mark — JBC Finance Manager Agent — Prisma schema
+//
+// Source of truth: CLAUDE.md section 5 (build spec).
+//
+// Mark is a SINK. He reads findings from 7 specialists (each behind its own
+// /api/findings + HUB_API_KEY) and caches them locally as IngestedFinding.
+// He never edits a specialist's data or any source system. His only writes are
+// his own orchestration records: poll status, briefs, correlated issues,
+// goal metrics, Q&A log, alert delivery audit.
+// ───────────────────────────────────────────────────────────────────
+
+generator client {
+  provider = "prisma-client-js"
+  // Generate into the project tree so Next.js 16 Turbopack doesn't hash the
+  // @prisma/client externalised module name. Local-path imports stay stable.
+  output   = "../lib/generated/prisma"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+/** Same shape as every other finance agent. SC + CQ. */
+model Entity {
+  id           String   @id @default(cuid())
+  code         String   @unique // "SC" | "CQ"
+  legalName    String
+  xeroTenantId String
+  createdAt    DateTime @default(now())
+}
+
+/**
+ * One row per specialist Mark watches. Updated on every poll attempt — the
+ * dashboard reads these to render the "specialist health" panel and the
+ * brief assembler treats a `failed` / `stale` agent as its own finding.
+ *
+ * Spec section 5 — SpecialistRunStatus.
+ */
+model SpecialistRunStatus {
+  id              String   @id @default(cuid())
+  agent           String   @unique // "reconciliation" | "controls-audit" | ...
+  lastRunAt       DateTime?
+  lastRunStatus   String   @default("never") // "ok" | "exceptions" | "failed" | "stale" | "never"
+  lastError       String?
+  exceptionsOpen  Int      @default(0)
+  updatedAt       DateTime @updatedAt
+
+  @@index([lastRunStatus])
+}
+
+/**
+ * Mark's local cache of every finding pulled from the 7 specialists. The
+ * bedrock for synthesis — pull once, query locally. Append-only on poll,
+ * with `resolved` updated when the upstream specialist reports the same
+ * finding as resolved.
+ *
+ * The composite unique on (specialistAgent, specialistFindingId) is the
+ * dedup key — re-polling never duplicates a row.
+ */
+model IngestedFinding {
+  id                   String   @id @default(cuid())
+  specialistAgent      String   // "reconciliation" | "controls-audit" | ...
+  specialistFindingId  String   // the id field on the source FinanceFinding
+  at                   DateTime // when the specialist created the finding
+  severity             String   // "critical" | "warning" | "info"
+  isPeopleFlag         Boolean  @default(false)
+  entityCode           String   // "SC" | "CQ" | "BOTH"
+  domain               String
+  detector             String
+  title                String
+  body                 String
+  explanation          String?
+  evidenceJson         Json
+  amount               Decimal? @db.Decimal(14, 2)
+  suggestedAction      String
+  resolved             Boolean  @default(false)
+  ingestedAt           DateTime @default(now())
+  updatedAt            DateTime @updatedAt
+
+  @@unique([specialistAgent, specialistFindingId])
+  @@index([entityCode, severity, resolved])
+  @@index([isPeopleFlag, resolved])
+  @@index([specialistAgent, resolved])
+  @@index([detector])
+  @@index([at])
+}
+
+/**
+ * A brief Mark generated and (usually) delivered. Stores both the rendered
+ * narrative and the audit trail of which specialist run states + ingested
+ * findings it drew on, so any brief is replayable.
+ *
+ * Spec section 5 — FinanceBrief.
+ */
+model FinanceBrief {
+  id               String   @id @default(cuid())
+  briefType        String   // "daily" | "weekly" | "monthly" | "restricted"
+  entityScope      String   // "SC" | "CQ" | "consolidated"
+  generatedAt      DateTime @default(now())
+  headline         String
+  narrative        String
+  sourcedRunIds    Json     // [{ agent, lastRunAt, lastRunStatus, exceptionsOpen }, ...]
+  itemsForAction   Json     // serialised correlated issues, snapshot at brief time
+  recipients       String   @default("") // comma-separated, audit trail
+  deliveryStatus   String   @default("pending") // "sent" | "skipped" | "error" | "pending"
+  deliveryError    String?
+
+  correlatedIssues CorrelatedIssue[]
+
+  @@index([briefType, generatedAt])
+}
+
+/**
+ * The output of Function B — dedupe + correlate + prioritise. One underlying
+ * issue is one row, even when 2+ specialists touched it. `sourceAgents` +
+ * `sourceExceptionIds` carry the audit trail back to ingested findings.
+ *
+ * Spec section 5 — CorrelatedIssue.
+ */
+model CorrelatedIssue {
+  id                  String   @id @default(cuid())
+  briefId             String?
+  brief               FinanceBrief? @relation(fields: [briefId], references: [id], onDelete: SetNull)
+  title               String
+  detail              String
+  priority            String   // "today" | "this-week" | "note"
+  sourceAgents        Json     // ["payables", "controls-audit"]
+  sourceExceptionIds  Json     // [{ agent, findingId }, ...]
+  isRestricted        Boolean  @default(false) // people / pay data routing flag
+  isConflict          Boolean  @default(false) // two specialists disagree about a fact
+  entityCode          String   @default("BOTH")
+  amount              Decimal? @db.Decimal(14, 2)
+  resolved            Boolean  @default(false)
+  resolvedAt          DateTime?
+  resolvedBy          String?
+  createdAt           DateTime @default(now())
+
+  @@index([priority, resolved])
+  @@index([isRestricted, resolved])
+  @@index([briefId])
+}
+
+/**
+ * The numbers Mark tracks honestly toward Tony's goals. Profit toward $3M is
+ * the headline; labour cost %, DSO, GST owed, unclaimed revenue are the
+ * supporting tape. Append-only — each capture is a row, trend is computed
+ * over the history.
+ *
+ * Spec section 5 — GoalMetric.
+ */
+model GoalMetric {
+  id          String   @id @default(cuid())
+  metric      String   // "profit-run-rate" | "labour-cost-pct" | "dso" | "unclaimed-revenue" | "net-gst"
+  entityScope String   // "SC" | "CQ" | "consolidated"
+  periodLabel String   // "2026-05" | "2026-Q2" | "2026-05-26" depending on metric
+  value       Decimal  @db.Decimal(18, 4)
+  target      Decimal? @db.Decimal(18, 4)
+  trend       String   @default("flat") // "improving" | "flat" | "worsening"
+  capturedAt  DateTime @default(now())
+
+  @@index([metric, capturedAt])
+  @@index([entityScope, metric])
+}
+
+/**
+ * Natural-language Q&A log. Every question + answer Mark gives, with the
+ * timestamp of the data he answered from. Auditable, replayable, and lets
+ * us spot if Mark started inventing numbers.
+ *
+ * Spec section 5 — FinanceQuery.
+ */
+model FinanceQuery {
+  id          String   @id @default(cuid())
+  askedBy     String
+  question    String
+  answer      String
+  dataAsOf    DateTime
+  createdAt   DateTime @default(now())
+
+  @@index([askedBy, createdAt])
+}
+
+/**
+ * Audit trail of every email Mark sent. Same shape as the specialists' own
+ * AlertDelivery rows — channel-gated peopleFlagsIncluded confirms restricted
+ * routing held.
+ */
+model AlertDelivery {
+  id                  String   @id @default(cuid())
+  channel             String   // "daily-brief" | "restricted-brief" | "weekly-report" | "monthly-pack" | "heartbeat-failure"
+  recipients          String
+  subject             String
+  flagsCount          Int      @default(0)
+  peopleFlagsIncluded Boolean  @default(false) // must be false on every channel except restricted-brief
+  status              String   // "sent" | "skipped" | "error"
+  errorMessage        String?
+  briefId             String?
+  sentAt              DateTime @default(now())
+
+  @@index([channel, sentAt])
+}
