@@ -41,6 +41,7 @@ const ROUTES: RouteRow[] = [
 
 interface UploadResult {
   ok: boolean;
+  sourceType?: string;
   sourceLabel?: string;
   target?: string;
   ingestBatchId?: string;
@@ -53,6 +54,29 @@ interface UploadResult {
   externalUrl?: string;
   message?: string;
 }
+
+interface RunResult {
+  ok: boolean;
+  triggeredBy?: string;
+  target?: string;
+  result?: {
+    status?: string;
+    exceptionsCount?: number;
+    criticalCount?: number;
+    peopleFlagsCount?: number;
+  };
+  error?: string;
+}
+
+/** Per source-type: which Mark dashboard page to visit after a run lands,
+ *  and whether a 'Run now' button makes sense on this UI. */
+const RUN_TARGETS: Record<string, { specialist: string; specialistLabel: string; brief: string }> = {
+  "myob-pay-export": {
+    specialist: "payroll-labour",
+    specialistLabel: "Payroll & Labour Agent",
+    brief: "super shortfall, PAYG anomalies, period-over-period variance",
+  },
+};
 
 const ACCEPT_ATTRIBUTE = [
   ".xlsx", ".xls", ".ods", ".csv",
@@ -68,6 +92,8 @@ export default function SourcesUploadPage() {
   const [file, setFile] = useState<File | null>(null);
   const [busy, setBusy] = useState(false);
   const [result, setResult] = useState<UploadResult | null>(null);
+  const [runBusy, setRunBusy] = useState(false);
+  const [runResult, setRunResult] = useState<RunResult | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
 
   const selectedRoute = ROUTES.find((r) => r.sourceType === sourceType);
@@ -92,6 +118,7 @@ export default function SourcesUploadPage() {
     if (!file) return;
     setBusy(true);
     setResult(null);
+    setRunResult(null);
     try {
       const form = new FormData();
       form.append("sourceType", sourceType);
@@ -99,6 +126,8 @@ export default function SourcesUploadPage() {
       form.append("file", file);
       const res = await fetch("/api/sources/upload", { method: "POST", body: form });
       const json = (await res.json()) as UploadResult;
+      // Make sure sourceType comes through (server-side may not echo it).
+      if (json.ok && !json.sourceType) json.sourceType = sourceType;
       setResult(json);
       if (json.ok) {
         clearFile();
@@ -107,6 +136,24 @@ export default function SourcesUploadPage() {
       setResult({ ok: false, error: e instanceof Error ? e.message : String(e) });
     } finally {
       setBusy(false);
+    }
+  }
+
+  async function runSpecialistNow(specialist: string) {
+    setRunBusy(true);
+    setRunResult(null);
+    try {
+      const res = await fetch("/api/sources/trigger-run", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ specialist }),
+      });
+      const json = (await res.json()) as RunResult;
+      setRunResult(json);
+    } catch (e) {
+      setRunResult({ ok: false, error: e instanceof Error ? e.message : String(e) });
+    } finally {
+      setRunBusy(false);
     }
   }
 
@@ -299,6 +346,68 @@ export default function SourcesUploadPage() {
                       ))}
                     </tbody>
                   </table>
+                </div>
+              ) : null}
+
+              {/* What happens next — the actionable bit */}
+              {result.sourceType && RUN_TARGETS[result.sourceType] ? (
+                <div
+                  style={{
+                    marginTop: 14,
+                    padding: 12,
+                    borderRadius: 8,
+                    background: "rgba(34, 211, 238, 0.06)",
+                    border: "1px solid rgba(34, 211, 238, 0.2)",
+                  }}
+                >
+                  <div style={{ fontSize: 12, textTransform: "uppercase", letterSpacing: 1.2, color: "var(--accent, #22d3ee)", marginBottom: 6 }}>
+                    What happens next
+                  </div>
+                  <div style={{ fontSize: 13, marginBottom: 10 }}>
+                    The <strong>{RUN_TARGETS[result.sourceType].specialistLabel}</strong> will
+                    consume this batch on its next run and surface findings on{" "}
+                    <strong>{RUN_TARGETS[result.sourceType].brief}</strong>. Anything critical
+                    fires a Twilio SMS direct from that agent. The next routine cron run
+                    lands at the scheduled time, or you can trigger one immediately:
+                  </div>
+                  <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
+                    <button
+                      className="btn btn-primary"
+                      disabled={runBusy}
+                      onClick={() => result.sourceType && runSpecialistNow(RUN_TARGETS[result.sourceType].specialist)}
+                    >
+                      {runBusy ? "Running…" : `Run ${RUN_TARGETS[result.sourceType].specialistLabel} now`}
+                    </button>
+                    <a href="/" style={{ fontSize: 12 }}>or check the latest Mark brief →</a>
+                  </div>
+                  {runResult ? (
+                    <div style={{ marginTop: 10, fontSize: 13 }}>
+                      {runResult.ok ? (
+                        <div>
+                          <div style={{ color: "var(--emerald, #34d399)", fontWeight: 600 }}>
+                            ✓ Run completed
+                          </div>
+                          <div style={{ marginTop: 4 }}>
+                            Status: <span className="mono">{runResult.result?.status ?? "ok"}</span>{" · "}
+                            Exceptions: <strong>{runResult.result?.exceptionsCount ?? 0}</strong>
+                            {(runResult.result?.criticalCount ?? 0) > 0 ? (
+                              <> · <span style={{ color: "var(--rose, #f43f5e)" }}>{runResult.result?.criticalCount} critical</span></>
+                            ) : null}
+                            {(runResult.result?.peopleFlagsCount ?? 0) > 0 ? (
+                              <> · <span style={{ color: "var(--amber, #fbbf24)" }}>{runResult.result?.peopleFlagsCount} people-flag</span></>
+                            ) : null}
+                          </div>
+                          <div className="muted" style={{ marginTop: 6, fontSize: 11 }}>
+                            Triggered by: <span className="mono">{runResult.triggeredBy}</span>. New findings will appear in Mark's next poll (every ~30 min) and on the agent's own /exceptions page.
+                          </div>
+                        </div>
+                      ) : (
+                        <div style={{ color: "var(--rose, #f43f5e)" }}>
+                          ✗ Run failed: {runResult.error}
+                        </div>
+                      )}
+                    </div>
+                  ) : null}
                 </div>
               ) : null}
             </>
