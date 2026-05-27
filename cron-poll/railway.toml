@@ -1,0 +1,9 @@
+[build]
+builder = "DOCKERFILE"
+dockerfilePath = "Dockerfile"
+
+[deploy]
+# Specialist poller: every 30 min. ping.sh POSTs /api/cron/poll with
+# MARK_ACTION=poll — env var set on the service.
+cronSchedule = "*/30 * * * *"
+restartPolicyType = "NEVER"

@@ -1,0 +1,9 @@
+[build]
+builder = "DOCKERFILE"
+dockerfilePath = "Dockerfile"
+
+[deploy]
+# Daily brief: 07:00 AEST = 21:00 UTC. ping.sh POSTs /api/cron/brief with
+# MARK_ACTION=brief, MARK_BRIEF_TYPE=daily — env vars set on the service.
+cronSchedule = "0 21 * * *"
+restartPolicyType = "NEVER"
