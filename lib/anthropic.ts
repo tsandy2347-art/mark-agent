@@ -14,6 +14,11 @@
 
 import Anthropic from "@anthropic-ai/sdk";
 import { env } from "./env";
+import {
+  CREATE_DRAFT_MANUAL_JOURNAL_TOOL,
+  executeCreateDraftTool,
+  type DraftToolInput,
+} from "./mark/journal-tool";
 
 let _client: Anthropic | null = null;
 function client(): Anthropic | null {
@@ -98,6 +103,31 @@ ABSOLUTE RULES — these never bend:
 
    Posting (Status=POSTED, flows to the GL): still off limits. Drafting
    (Status=DRAFT, sits in Xero awaiting human Post): now on offer.
+
+   IN-CHAT DRAFT TOOL — STRICT CONFIRMATION REQUIRED:
+   You have access to a tool called create_draft_manual_journal. When the
+   user asks you to draft a journal, the flow MUST be:
+
+     Turn 1 — User asks. You PROPOSE the lines in plain text. End with
+              exactly: "Reply YES to confirm and I'll create the draft now."
+              DO NOT call the tool on this turn.
+
+     Turn 2 — User replies. If they typed YES / "yes do it" / "go ahead" /
+              "create it" / "create the draft" / any clear affirmative,
+              CALL the tool with the lines you proposed in Turn 1. Don't
+              re-propose. Don't ask again.
+              If their reply is ambiguous (edits, questions, "wait"), keep
+              talking — don't call the tool.
+
+   On a successful tool call your reply should confirm: "✓ Draft created
+   in Xero" + the deep-link from the tool result + the ManualJournalID +
+   "Nicole / Tony / the external accountant clicks Post in Xero when ready."
+
+   On a tool error: apologise plainly, quote the error, ask the user how
+   they'd like to proceed.
+
+   Hard rule: never call the tool without a clear affirmative from the
+   user in the IMMEDIATELY PREVIOUS turn. No "I assumed you wanted me to".
 
 3. You never invent numbers. Only use the figures present in the data provided
    to you in this turn. If a figure is missing, say "I don't have that number"
@@ -337,6 +367,12 @@ interface QaInput {
    *  (cross-session facts about the asking user). Appended to the static
    *  MARK_SYSTEM prompt for this turn only. Empty / undefined = ignored. */
   memoryAddendum?: string;
+  /** When set, Mark may call the create_draft_manual_journal tool inside this
+   *  turn. The value becomes the x-triggered-by header forwarded to recon
+   *  ("user:nicole" etc.) so the audit log captures the human, not "agent:mark".
+   *  Tool is offered only when this is set — Q&A-only callers leave it
+   *  undefined and Mark can't act. */
+  draftJournalTriggeredBy?: string;
 }
 
 const IMAGE_MIME_TYPES = new Set([
@@ -436,6 +472,9 @@ async function spreadsheetToText(a: QaAttachment): Promise<string> {
 export interface QaOutput {
   answer: string;
   fromModel: boolean;
+  /** Number of times the create-draft tool fired this turn (0 = pure
+   *  conversation, >0 = a draft was created via the tool path). */
+  toolCallsFired?: number;
 }
 
 export async function answerQuestion(input: QaInput): Promise<QaOutput> {
@@ -553,24 +592,83 @@ export async function answerQuestion(input: QaInput): Promise<QaOutput> {
       ? `${MARK_SYSTEM}\n${input.memoryAddendum}`
       : MARK_SYSTEM;
 
-    const resp = await c.messages.create({
-      model: env.ANTHROPIC_MODEL,
-      max_tokens: 1800,
-      system: systemPrompt,
-      messages,
-    });
-    const text = resp.content
-      .filter((b): b is Anthropic.TextBlock => b.type === "text")
-      .map((b) => b.text)
-      .join("")
-      .trim();
-    if (!text) {
-      return {
-        answer: `I don't have an answer for that from the current data. Data as of ${input.dataAsOf}.`,
-        fromModel: false,
-      };
+    // Tool wiring — only offer the draft tool when the caller passed an
+    // explicit triggered-by identity. The /api/qa route sets this from the
+    // basic-auth username; an ad-hoc API caller without auth identity can't
+    // commit drafts via this path.
+    const toolsEnabled = Boolean(input.draftJournalTriggeredBy);
+    const tools: Anthropic.Messages.Tool[] | undefined = toolsEnabled
+      ? [CREATE_DRAFT_MANUAL_JOURNAL_TOOL]
+      : undefined;
+
+    // Agentic loop: at most 3 iterations (propose / tool_use / final reply
+    // — leaves headroom but caps runaway). We accumulate any text Mark
+    // emits along the way and return the last natural-language message.
+    let composedText = "";
+    let toolCallsFired = 0;
+    for (let iter = 0; iter < 3; iter++) {
+      const resp = await c.messages.create({
+        model: env.ANTHROPIC_MODEL,
+        max_tokens: 2000,
+        system: systemPrompt,
+        messages,
+        ...(tools ? { tools } : {}),
+      });
+
+      // Collect any plain-text blocks (Claude often emits a short narration
+      // alongside a tool_use — e.g. "Creating the draft now…").
+      const turnText = resp.content
+        .filter((b): b is Anthropic.TextBlock => b.type === "text")
+        .map((b) => b.text)
+        .join("")
+        .trim();
+      if (turnText) composedText = turnText;
+
+      if (resp.stop_reason !== "tool_use") break;
+
+      // Find the tool_use block. We only know about one tool today.
+      const toolUse = resp.content.find(
+        (b): b is Anthropic.ToolUseBlock =>
+          b.type === "tool_use" && b.name === CREATE_DRAFT_MANUAL_JOURNAL_TOOL.name,
+      );
+      if (!toolUse) {
+        // Unknown tool — bail out gracefully.
+        composedText =
+          composedText ||
+          `I tried to call a tool I don't know about. Data as of ${input.dataAsOf}.`;
+        break;
+      }
+
+      // Execute the tool. If draftJournalTriggeredBy is unset we shouldn't
+      // have offered it; defensive check anyway.
+      toolCallsFired++;
+      const result = await executeCreateDraftTool({
+        input: toolUse.input as DraftToolInput,
+        triggeredBy: input.draftJournalTriggeredBy || "agent:mark",
+      });
+
+      // Push the assistant's tool_use block + our tool_result back into the
+      // message history so Claude can compose the final reply with full
+      // context (including the Xero deep-link on success).
+      messages.push({ role: "assistant", content: resp.content });
+      messages.push({
+        role: "user",
+        content: [
+          {
+            type: "tool_result",
+            tool_use_id: toolUse.id,
+            content: JSON.stringify(result),
+            is_error: !result.ok,
+          },
+        ],
+      });
+      // Loop continues to get Claude's natural-language follow-up.
     }
-    return { answer: text, fromModel: true };
+
+    const answer =
+      composedText ||
+      `I don't have an answer for that from the current data. Data as of ${input.dataAsOf}.`;
+    return { answer, fromModel: true, toolCallsFired };
   } catch (e) {
     const reason = e instanceof Error ? e.message : String(e);
     return {

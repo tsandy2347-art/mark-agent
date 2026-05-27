@@ -50,6 +50,9 @@ export interface AskOutput {
   /** Diagnostics for the UI: was the memory layer disabled or errored
    *  this turn? */
   memory: { disabled: boolean; errored: boolean };
+  /** Number of times Mark fired the create-draft tool this turn. >0 means
+   *  a draft was actually written to Xero via recon. */
+  toolCallsFired: number;
 }
 
 export async function askMark(input: AskInput): Promise<AskOutput> {
@@ -122,13 +125,16 @@ export async function askMark(input: AskInput): Promise<AskOutput> {
     })),
   };
 
-  const { answer } = await answerQuestion({
+  const { answer, toolCallsFired } = await answerQuestion({
     question: input.question,
     dataAsOf,
     data,
     attachments: input.attachments,
     history: input.history,
     memoryAddendum: formatMemoryAddendum(memory),
+    // Identity that flows to recon as x-triggered-by when Mark calls the
+    // create_draft_manual_journal tool. Always populated — "user:nicole" etc.
+    draftJournalTriggeredBy: `user:${userPeer}`,
   });
 
   // Audit log: if the user attached files, record the filenames in the
@@ -171,5 +177,6 @@ export async function askMark(input: AskInput): Promise<AskOutput> {
     queryId: row.id,
     sessionId: input.sessionId ?? null,
     memory: { disabled: memory.disabled, errored: memory.errored },
+    toolCallsFired: toolCallsFired ?? 0,
   };
 }
