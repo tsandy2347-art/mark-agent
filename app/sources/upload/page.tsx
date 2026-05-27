@@ -113,12 +113,28 @@ export default function SourcesUploadPage() {
   return (
     <main className="container" style={{ maxWidth: 820 }}>
       <h1>Upload source data</h1>
-      <p className="muted" style={{ marginBottom: 18 }}>
-        Drop an export here and it's routed to the specialist that owns it.
-        Today MYOB Pay Export is live; the rest of the source types are
-        scaffolded — they'll come online as each parser lands. Mirus
-        post-payroll data goes to the existing Payroll Analyser tool.
+      <p className="muted" style={{ marginBottom: 12 }}>
+        Drop an export here and it's stored for the specialist that owns it
+        to consume on its next run. Today MYOB Pay Export is live; the rest
+        of the source types are scaffolded — they'll come online as each
+        parser lands. Mirus post-payroll data goes to the existing Payroll
+        Analyser tool.
       </p>
+      <div
+        style={{
+          padding: 10,
+          borderRadius: 6,
+          background: "var(--accent-soft, rgba(34,211,238,0.15))",
+          color: "var(--accent, #22d3ee)",
+          fontSize: 13,
+          marginBottom: 18,
+        }}
+      >
+        <strong>Looking to draft a journal from a file?</strong> That's a different
+        page. <a href="/journals/from-file" style={{ color: "inherit", textDecoration: "underline" }}>Go to /journals/from-file →</a>{" "}
+        Mark proposes balanced lines, you review/edit, the reconciliation agent
+        creates the DRAFT in Xero.
+      </div>
 
       <div className="card" style={{ marginBottom: 16 }}>
         <label className="field-label" htmlFor="srctype">Source type</label>
