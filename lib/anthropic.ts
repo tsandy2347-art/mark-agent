@@ -19,6 +19,11 @@ import {
   executeCreateDraftTool,
   type DraftToolInput,
 } from "./mark/journal-tool";
+import {
+  CREATE_PAYROLL_JOURNAL_TOOL,
+  executePayrollJournalTool,
+  type PayrollToolInput,
+} from "./mark/payroll-journal-tool";
 
 let _client: Anthropic | null = null;
 function client(): Anthropic | null {
@@ -160,6 +165,91 @@ ABSOLUTE RULES — these never bend:
    The whole point of draft-only is to make this safe. Wrong code in a
    draft is a non-event. Refusing to draft for fear of a wrong code
    defeats the design.
+
+   ─── JBC PAYROLL JOURNALS — second tool: create_payroll_journal ───
+
+   You ALSO have a second tool called create_payroll_journal. It exists
+   specifically for the weekly JBC payroll journal pattern Craig used to
+   post manually (e.g. Journal #673782, Payrun1910 we 1904). It posts TWO
+   journals at once — one in SC Xero (with SC + Wide Bay distinguished
+   by Xero \`Location\` tracking + 877 Tracking Transfers clearing), one in
+   CQ Xero (single location, no tracking) — both DRAFT, hard-locked by
+   recon.
+
+   The JBC payroll chart (use these defaults; users override per-line if
+   their chart differs):
+
+     477   Wages and Salaries — Direct        (DR, Location-tagged)
+     477.4 Wages — Indirect                   (DR, Location-tagged)
+     478   Superannuation — Direct            (DR, Location-tagged)
+     478.1 Superannuation — Indirect          (DR, Location-tagged)
+     803   Wages Payable                      (CR, no tracking)
+     825   PAYG Withholdings Payable          (CR, no tracking)
+     826   Superannuation Payable             (CR, no tracking)
+     877   Tracking Transfers (clearing)      (both sides — see below)
+     918   Provision for Annual Leave         (used only when leave detail is broken out)
+
+   Direct vs Indirect: MYOB Department \`Field\` = Direct (front-line /
+   billable support workers). EVERYTHING ELSE (Administration / Management /
+   Finance / HR / Rostering / Home Care Package / HCP Administration /
+   NDIS Disability / NDIS SIL) = Indirect.
+
+   The 877 Tracking Transfers pattern (only on SC tenant, not CQ):
+     - Each expense DR (477/477.4/478/478.1) carries the Location tag
+     - Each Location block has a matching 877 CR with the SAME location
+       (clears the location side of the P&L per Location)
+     - The payable CRs (803/825/826) carry NO tracking (clean BS)
+     - An untracked 877 DR matches the sum of payable CRs (clears the BS
+       side, balances the journal)
+   Net effect: 877 nets to zero overall but lets SC's P&L split by
+   Sunshine Coast vs Wide Bay while the payables stay clean. Recon's
+   build does this for you — you don't need to construct the 877 lines
+   yourself, just pass the totals.
+
+   Payable allocation (per Craig's pattern, verified against #673782):
+     - 803 Wages Payable    = Net + PreTaxDed + PostTaxDed
+     - 825 PAYG Payable     = PAYG
+     - 826 Super Payable    = EmployerSuper only (no PreTaxDed — the
+                              salary-sacrifice $ goes via Wages Payable
+                              and is transferred to Super Payable when
+                              the super clearing-house is paid)
+
+   MYOB column math (must reconcile per bucket):
+     Net = Gross − PreTaxDed − PAYG + AfterTax − PostTaxDed
+   If a user gives you totals that don't satisfy this, FLAG IT and ask
+   them to re-check before YES. Recon's pre-flight will reject anyway.
+
+   Multi-pay-run files: the MYOB Pay Activity Summary is often filtered
+   by Physical Pay Date, which can catch multiple pay runs in one export
+   (e.g. main weekly + off-cycle adjustments). Craig's pattern is ONE
+   journal PER PAY RUN, not one per file. When the user's file contains
+   multiple pay runs:
+     1. Tally per-pay-run separately
+     2. Propose N journals (one per pay run), each named like
+        "Payrun<NNNN> we <DDMM>" matching Craig's convention
+     3. After each YES, call create_payroll_journal once per pay run
+   Off-cycle single-employee adjustment runs are still distinct journals
+   in Craig's pattern.
+
+   THE TWO-TURN YES PROTOCOL — same as create_draft_manual_journal:
+     Turn 1: User asks. You propose totals per (entity × directness),
+             list the proposed journal lines, show DR/CR balance,
+             quote the default chart codes, end with "Reply YES to
+             confirm and I'll create the drafts in Xero now."
+     Turn 2: On YES → call create_payroll_journal with the totals you
+             proposed. On ambiguous reply → keep talking, don't call.
+
+   On success the tool returns per-tenant {posted, xeroLink,
+   ManualJournalID, totalDr, totalCr, lineCount}. Confirm to the user
+   with both Xero deep-links + "Nicole / Tony / external accountant
+   posts in Xero when ready". If Xero rejected one tenant's journal
+   (e.g. unknown account code, unknown Location option name), the
+   per-tenant errorMessage is returned — relay it verbatim and ask
+   how the user wants to proceed.
+
+   Hard rules same as the simple-draft tool: never call without explicit
+   YES; never call for a POSTED journal; status is hard-locked DRAFT in
+   recon and you cannot escalate.
 
 3. You never invent numbers. Only use the figures present in the data provided
    to you in this turn. If a figure is missing, say "I don't have that number"
@@ -630,7 +720,7 @@ export async function answerQuestion(input: QaInput): Promise<QaOutput> {
     // commit drafts via this path.
     const toolsEnabled = Boolean(input.draftJournalTriggeredBy);
     const tools: Anthropic.Messages.Tool[] | undefined = toolsEnabled
-      ? [CREATE_DRAFT_MANUAL_JOURNAL_TOOL]
+      ? [CREATE_DRAFT_MANUAL_JOURNAL_TOOL, CREATE_PAYROLL_JOURNAL_TOOL]
       : undefined;
 
     // Agentic loop: at most 3 iterations (propose / tool_use / final reply
@@ -658,42 +748,68 @@ export async function answerQuestion(input: QaInput): Promise<QaOutput> {
 
       if (resp.stop_reason !== "tool_use") break;
 
-      // Find the tool_use block. We only know about one tool today.
-      const toolUse = resp.content.find(
-        (b): b is Anthropic.ToolUseBlock =>
-          b.type === "tool_use" && b.name === CREATE_DRAFT_MANUAL_JOURNAL_TOOL.name,
+      // Claude may emit MULTIPLE tool_use blocks in a single turn (parallel
+      // tool calls). Anthropic requires a tool_result for EVERY tool_use in
+      // the same following user message — miss one and the next API call
+      // fails with `messages.N: tool_use ids were found without tool_result
+      // blocks`. So execute every tool_use in this response and emit a
+      // matching tool_result for each, in the same user message.
+      const toolUses = resp.content.filter(
+        (b): b is Anthropic.ToolUseBlock => b.type === "tool_use",
       );
-      if (!toolUse) {
-        // Unknown tool — bail out gracefully.
+      if (toolUses.length === 0) {
+        // stop_reason says tool_use but no blocks present — defensive bail.
         composedText =
           composedText ||
-          `I tried to call a tool I don't know about. Data as of ${input.dataAsOf}.`;
+          `I tried to call a tool but no tool block was returned. Data as of ${input.dataAsOf}.`;
         break;
       }
 
-      // Execute the tool. If draftJournalTriggeredBy is unset we shouldn't
-      // have offered it; defensive check anyway.
-      toolCallsFired++;
-      const result = await executeCreateDraftTool({
-        input: toolUse.input as DraftToolInput,
-        triggeredBy: input.draftJournalTriggeredBy || "agent:mark",
-      });
-
-      // Push the assistant's tool_use block + our tool_result back into the
-      // message history so Claude can compose the final reply with full
-      // context (including the Xero deep-link on success).
-      messages.push({ role: "assistant", content: resp.content });
-      messages.push({
-        role: "user",
-        content: [
-          {
+      const toolResultBlocks: Anthropic.Messages.ToolResultBlockParam[] = [];
+      for (const tu of toolUses) {
+        if (tu.name === CREATE_DRAFT_MANUAL_JOURNAL_TOOL.name) {
+          toolCallsFired++;
+          const result = await executeCreateDraftTool({
+            input: tu.input as DraftToolInput,
+            triggeredBy: input.draftJournalTriggeredBy || "agent:mark",
+          });
+          toolResultBlocks.push({
             type: "tool_result",
-            tool_use_id: toolUse.id,
+            tool_use_id: tu.id,
             content: JSON.stringify(result),
             is_error: !result.ok,
-          },
-        ],
-      });
+          });
+        } else if (tu.name === CREATE_PAYROLL_JOURNAL_TOOL.name) {
+          toolCallsFired++;
+          const result = await executePayrollJournalTool({
+            input: tu.input as PayrollToolInput,
+            triggeredBy: input.draftJournalTriggeredBy || "agent:mark",
+          });
+          toolResultBlocks.push({
+            type: "tool_result",
+            tool_use_id: tu.id,
+            content: JSON.stringify(result),
+            is_error: !result.ok,
+          });
+        } else {
+          // Unknown tool — still emit a tool_result so the message array
+          // stays valid; mark it as an error so Claude can react.
+          toolResultBlocks.push({
+            type: "tool_result",
+            tool_use_id: tu.id,
+            content: JSON.stringify({
+              ok: false,
+              error: `Unknown tool: ${tu.name}`,
+            }),
+            is_error: true,
+          });
+        }
+      }
+
+      // Push the assistant turn (full resp.content, including ALL tool_use
+      // blocks) followed by one user message carrying every tool_result.
+      messages.push({ role: "assistant", content: resp.content });
+      messages.push({ role: "user", content: toolResultBlocks });
       // Loop continues to get Claude's natural-language follow-up.
     }
 
