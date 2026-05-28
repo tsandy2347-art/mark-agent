@@ -52,6 +52,10 @@ const schema = z.object({
   SPECIALIST_RECEIVABLES_CRON_SECRET: z.string().optional().default(""),
   SPECIALIST_TAX_COMPLIANCE_CRON_SECRET: z.string().optional().default(""),
 
+  /** Public-proxy URL for the hermes-jbc Postgres `findings` + `audit_runs`
+   *  tables. Read-only. Powers /hermes-activity. Leave blank to hide the page. */
+  HERMES_FINDINGS_DATABASE_URL: z.string().optional().default(""),
+
   // ── Anthropic ────────────────────────────────────────────────────
   ANTHROPIC_API_KEY: z.string().optional().default(""),
   ANTHROPIC_MODEL: z.string().default("claude-sonnet-4-6"),
