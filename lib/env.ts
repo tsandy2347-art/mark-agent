@@ -56,6 +56,22 @@ const schema = z.object({
    *  tables. Read-only. Powers /hermes-activity. Leave blank to hide the page. */
   HERMES_FINDINGS_DATABASE_URL: z.string().optional().default(""),
 
+  // ── LLM backend routing ─────────────────────────────────────────
+  /** Which LLM endpoint Mark's /qa calls. "anthropic" (default) hits the
+   *  Anthropic SDK directly — fast, proven, no learning loop. "hermes" hits
+   *  hermes-jbc /v1/chat/completions — slower (loads skill registry every
+   *  turn, ~16K prompt-tokens of overhead), but feeds Hermes's autonomous
+   *  skill_manage loop so Mark gradually authors new skills from experience. */
+  MARK_LLM_BACKEND: z
+    .enum(["anthropic", "hermes"]) // strict — typo = fail-fast
+    .optional()
+    .default("anthropic"),
+  /** hermes-jbc base URL (https://hermes-jbc-production.up.railway.app).
+   *  Required when MARK_LLM_BACKEND=hermes. */
+  HERMES_BASE_URL: z.string().optional().default(""),
+  /** Bearer key for hermes-jbc /v1/* — matches API_SERVER_KEY on hermes-jbc. */
+  HERMES_API_SERVER_KEY: z.string().optional().default(""),
+
   // ── Anthropic ────────────────────────────────────────────────────
   ANTHROPIC_API_KEY: z.string().optional().default(""),
   ANTHROPIC_MODEL: z.string().default("claude-sonnet-4-6"),

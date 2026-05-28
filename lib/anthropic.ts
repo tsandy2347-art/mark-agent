@@ -28,6 +28,7 @@ import {
   TRIGGER_SPECIALIST_RUN_TOOL,
   executeTriggerSpecialistRunTool,
 } from "./mark/specialist-trigger-tool";
+import { callHermesAsAnthropic } from "./mark/hermes-client";
 
 let _client: Anthropic | null = null;
 function client(): Anthropic | null {
@@ -758,13 +759,27 @@ export async function answerQuestion(input: QaInput): Promise<QaOutput> {
     let composedText = "";
     let toolCallsFired = 0;
     for (let iter = 0; iter < 3; iter++) {
-      const resp = await c.messages.create({
-        model: env.ANTHROPIC_MODEL,
-        max_tokens: 2000,
-        system: systemPrompt,
-        messages,
-        ...(tools.length ? { tools } : {}),
-      });
+      // Backend split:
+      //   - "anthropic": direct SDK, fast, no learning loop.
+      //   - "hermes":    route through hermes-jbc /v1/chat/completions so
+      //                  every conversation feeds Hermes's autonomous
+      //                  skill_manage loop. Shim translates OpenAI <-> Anthropic
+      //                  in lib/mark/hermes-client.ts so this loop is unchanged.
+      const resp =
+        env.MARK_LLM_BACKEND === "hermes"
+          ? await callHermesAsAnthropic({
+              systemPrompt,
+              messages,
+              tools,
+              maxTokens: 2000,
+            })
+          : await c.messages.create({
+              model: env.ANTHROPIC_MODEL,
+              max_tokens: 2000,
+              system: systemPrompt,
+              messages,
+              ...(tools.length ? { tools } : {}),
+            });
 
       // Collect any plain-text blocks (Claude often emits a short narration
       // alongside a tool_use — e.g. "Creating the draft now…").
