@@ -13,6 +13,7 @@ import {
   hermesConfigured,
   listRecentAuditRuns,
   listRecentFindings,
+  listSkillInventory,
   summariseByAgent,
 } from "@/lib/hermes-findings";
 
@@ -53,11 +54,18 @@ export default async function HermesActivityPage() {
     );
   }
 
-  const [bySkill, runs, findings] = await Promise.all([
+  const [bySkill, runs, findings, inventory] = await Promise.all([
     summariseByAgent(),
     listRecentAuditRuns(30),
     listRecentFindings(30),
+    listSkillInventory(200),
   ]);
+
+  // Heuristic: a skill modified within the last 6h that ISN'T one of the
+  // skills we baked at deploy time is likely agent-authored. We don't know
+  // the deploy timestamp here so "recently modified" is the proxy.
+  const sixHoursAgo = new Date(Date.now() - 6 * 60 * 60 * 1000);
+  const recentSkills = inventory.filter((s) => s.mtime > sixHoursAgo);
 
   return (
     <main className="container">
@@ -68,7 +76,82 @@ export default async function HermesActivityPage() {
         Data source: <code>FINDINGS_DATABASE_URL</code> on hermes-jbc.
       </p>
 
-      <h2 style={{ marginTop: 24 }}>Skills</h2>
+      <h2 style={{ marginTop: 24 }}>Skills inventory ({inventory.length} on disk)</h2>
+      <p className="muted">
+        Live walk of <code>$HERMES_HOME/skills/</code> on the hermes-jbc
+        container, refreshed every 10 min by the <code>skill-inventory</code>
+        cron. Rows sorted by file mtime DESC — anything new or recently
+        modified (incl. anything Hermes authored autonomously via{" "}
+        <code>skill_manage</code>) shows up at the top.
+        {recentSkills.length > 0 && (
+          <>
+            {" "}
+            <strong style={{ color: "#0066cc" }}>
+              {recentSkills.length} modified in the last 6h.
+            </strong>
+          </>
+        )}
+      </p>
+      <div className="card" style={{ padding: 0, overflow: "hidden" }}>
+        <table>
+          <thead>
+            <tr>
+              <th>Skill</th>
+              <th>Namespace</th>
+              <th>Description</th>
+              <th>Last modified</th>
+            </tr>
+          </thead>
+          <tbody>
+            {inventory.length === 0 && (
+              <tr>
+                <td colSpan={4} className="muted">
+                  No inventory yet. First scan runs within 10 min of the next
+                  hermes-jbc deploy.
+                </td>
+              </tr>
+            )}
+            {inventory.slice(0, 60).map((s) => {
+              const isRecent = s.mtime > sixHoursAgo;
+              return (
+                <tr key={s.path} style={isRecent ? { background: "#fff8e1" } : undefined}>
+                  <td>
+                    <strong>{s.name}</strong>
+                    {isRecent && (
+                      <span
+                        style={{
+                          marginLeft: 8,
+                          fontSize: 11,
+                          color: "#b8860b",
+                          fontWeight: 600,
+                        }}
+                      >
+                        NEW/MOD
+                      </span>
+                    )}
+                  </td>
+                  <td className="mono" style={{ fontSize: 12 }}>
+                    {s.parent || "(root)"}
+                  </td>
+                  <td className="muted" style={{ fontSize: 12, maxWidth: 480 }}>
+                    {s.description || "—"}
+                  </td>
+                  <td className="mono" style={{ fontSize: 12 }}>
+                    {brisbane(s.mtime)}
+                  </td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+      </div>
+      {inventory.length > 60 && (
+        <p className="muted" style={{ fontSize: 12 }}>
+          Showing top 60 of {inventory.length}.
+        </p>
+      )}
+
+      <h2 style={{ marginTop: 24 }}>Run summary by source agent</h2>
       <div className="card" style={{ padding: 0, overflow: "hidden" }}>
         <table>
           <thead>

@@ -116,6 +116,44 @@ export interface HermesAgentSummary {
   totalRuns: number;
 }
 
+export interface HermesSkillInventoryRow {
+  path: string;
+  name: string;
+  parent: string | null;
+  description: string | null;
+  mtime: Date;
+  scannedAt: Date;
+  deleted: boolean;
+}
+
+export async function listSkillInventory(limit = 100): Promise<HermesSkillInventoryRow[]> {
+  if (!hermesConfigured()) return [];
+  // Tolerate "table doesn't exist yet" — first scan hasn't fired.
+  try {
+    const { rows } = await pool().query(
+      `SELECT path, name, parent, description, mtime, scanned_at, deleted
+         FROM skills_inventory
+         WHERE deleted = false
+         ORDER BY mtime DESC
+         LIMIT $1`,
+      [limit],
+    );
+    return rows.map((r) => ({
+      path: r.path,
+      name: r.name,
+      parent: r.parent,
+      description: r.description,
+      mtime: r.mtime,
+      scannedAt: r.scanned_at,
+      deleted: r.deleted,
+    }));
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    if (/does not exist/i.test(msg)) return [];
+    throw e;
+  }
+}
+
 export async function summariseByAgent(): Promise<HermesAgentSummary[]> {
   if (!hermesConfigured()) return [];
   // Two roll-ups in one round-trip via a CTE — total_runs + last_run from
