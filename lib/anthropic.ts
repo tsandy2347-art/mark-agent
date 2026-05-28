@@ -24,6 +24,10 @@ import {
   executePayrollJournalTool,
   type PayrollToolInput,
 } from "./mark/payroll-journal-tool";
+import {
+  TRIGGER_SPECIALIST_RUN_TOOL,
+  executeTriggerSpecialistRunTool,
+} from "./mark/specialist-trigger-tool";
 
 let _client: Anthropic | null = null;
 function client(): Anthropic | null {
@@ -133,6 +137,28 @@ ABSOLUTE RULES — these never bend:
 
    Hard rule: never call the tool without a clear affirmative from the
    user in the IMMEDIATELY PREVIOUS turn. No "I assumed you wanted me to".
+
+   ON-DEMAND SPECIALIST RE-RUN — trigger_specialist_run tool:
+   You also have a read-only tool called trigger_specialist_run. Call it
+   when the user explicitly asks for fresh data from one specialist
+   ("rerun recon", "recheck claims", "refresh receivables", "is that
+   still true — recheck") OR when you notice your cached snapshot is
+   stale enough that the honest answer needs a fresh pull.
+
+   No confirmation YES needed for this one — it's read-only on JBC's
+   side (the specialist runs the same flow its 07:00 cron would have
+   fired; nothing posts or pays). Pass the specialist's canonical name:
+   reconciliation | controls-audit | payroll-labour | payables |
+   revenue-claims | receivables | tax-compliance.
+
+   The tool blocks until the run finishes (recon ~5s, controls-audit
+   can be ~3min). When it returns, quote the headline counts from the
+   result and answer the user from the FRESH state. Mark's poller will
+   ingest the new findings automatically on its next 30-min tick.
+
+   Don't fire it more than once per specialist per chat turn. If the
+   tool returns ok=false with "no CRON_SECRET configured", tell the
+   user that specialist isn't wired for on-demand yet — don't retry.
 
    ACCOUNT CODES — important, read carefully:
    You do NOT have the Xero chart of accounts in your ingested findings.
@@ -714,14 +740,17 @@ export async function answerQuestion(input: QaInput): Promise<QaOutput> {
       ? `${MARK_SYSTEM}\n${input.memoryAddendum}`
       : MARK_SYSTEM;
 
-    // Tool wiring — only offer the draft tool when the caller passed an
-    // explicit triggered-by identity. The /api/qa route sets this from the
-    // basic-auth username; an ad-hoc API caller without auth identity can't
-    // commit drafts via this path.
-    const toolsEnabled = Boolean(input.draftJournalTriggeredBy);
-    const tools: Anthropic.Messages.Tool[] | undefined = toolsEnabled
-      ? [CREATE_DRAFT_MANUAL_JOURNAL_TOOL, CREATE_PAYROLL_JOURNAL_TOOL]
-      : undefined;
+    // Tool wiring:
+    //   - The two journal-writing tools are gated behind an explicit
+    //     triggered-by identity (caller must be a Basic-auth human). Drafts
+    //     go to Xero — we want the audit trail to name a real human.
+    //   - trigger_specialist_run is read-only on the JBC side (kicks a
+    //     specialist's existing audit pipeline) so it's always on.
+    const draftToolsEnabled = Boolean(input.draftJournalTriggeredBy);
+    const tools: Anthropic.Messages.Tool[] = [TRIGGER_SPECIALIST_RUN_TOOL];
+    if (draftToolsEnabled) {
+      tools.push(CREATE_DRAFT_MANUAL_JOURNAL_TOOL, CREATE_PAYROLL_JOURNAL_TOOL);
+    }
 
     // Agentic loop: at most 3 iterations (propose / tool_use / final reply
     // — leaves headroom but caps runaway). We accumulate any text Mark
@@ -734,7 +763,7 @@ export async function answerQuestion(input: QaInput): Promise<QaOutput> {
         max_tokens: 2000,
         system: systemPrompt,
         messages,
-        ...(tools ? { tools } : {}),
+        ...(tools.length ? { tools } : {}),
       });
 
       // Collect any plain-text blocks (Claude often emits a short narration
@@ -785,6 +814,17 @@ export async function answerQuestion(input: QaInput): Promise<QaOutput> {
             input: tu.input as PayrollToolInput,
             triggeredBy: input.draftJournalTriggeredBy || "agent:mark",
           });
+          toolResultBlocks.push({
+            type: "tool_result",
+            tool_use_id: tu.id,
+            content: JSON.stringify(result),
+            is_error: !result.ok,
+          });
+        } else if (tu.name === TRIGGER_SPECIALIST_RUN_TOOL.name) {
+          toolCallsFired++;
+          const result = await executeTriggerSpecialistRunTool(
+            tu.input as { specialist?: unknown },
+          );
           toolResultBlocks.push({
             type: "tool_result",
             tool_use_id: tu.id,

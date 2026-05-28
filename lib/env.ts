@@ -39,6 +39,19 @@ const schema = z.object({
    *  In production the same value lives on Mark + all 7 specialists. */
   HUB_API_KEY: z.string().optional().default(""),
 
+  // Per-specialist CRON_SECRET — Mark presents this when the user asks for
+  // an on-demand re-run via the trigger_specialist_run tool. NOT the same
+  // as HUB_API_KEY: each specialist's /api/cron/run uses its own secret.
+  // Leave blank to disable on-demand triggering for that specialist (the
+  // tool returns a clear "not wired" error).
+  SPECIALIST_RECONCILIATION_CRON_SECRET: z.string().optional().default(""),
+  SPECIALIST_CONTROLS_AUDIT_CRON_SECRET: z.string().optional().default(""),
+  SPECIALIST_PAYROLL_LABOUR_CRON_SECRET: z.string().optional().default(""),
+  SPECIALIST_PAYABLES_CRON_SECRET: z.string().optional().default(""),
+  SPECIALIST_REVENUE_CLAIMS_CRON_SECRET: z.string().optional().default(""),
+  SPECIALIST_RECEIVABLES_CRON_SECRET: z.string().optional().default(""),
+  SPECIALIST_TAX_COMPLIANCE_CRON_SECRET: z.string().optional().default(""),
+
   // ── Anthropic ────────────────────────────────────────────────────
   ANTHROPIC_API_KEY: z.string().optional().default(""),
   ANTHROPIC_MODEL: z.string().default("claude-sonnet-4-6"),
