@@ -201,3 +201,33 @@ model AlertDelivery {
 
   @@index([channel, sentAt])
 }
+
+/**
+ * Raw source-file uploads that Mark holds for the read-only Hermes skills.
+ *
+ * Tony / Lindsay drop MYOB pay exports + AlayaCare service-delivery exports
+ * into /imports. The bytes live here (Postgres bytea). The skills
+ * jbc-payroll-labour and jbc-revenue-claims fetch the latest CSV of a kind
+ * via GET /api/imports/{kind}/latest on each run — that's how a separate
+ * Railway service with its own volume gets at the file.
+ *
+ * Append-only — every upload is a row; "latest" = MAX(uploadedAt). When a
+ * skill run consumes a row it stamps processedAt + processedRunId so we can
+ * see which CSV powered which audit run.
+ */
+model CsvImport {
+  id              String   @id @default(cuid())
+  kind            String   // "myob" | "alayacare"
+  entityCode      String?  // "SC" | "CQ" | null (applies to all / unspecified)
+  filename        String
+  mimeType        String
+  sizeBytes       Int
+  bytes           Bytes
+  uploadedAt      DateTime @default(now())
+  uploadedBy      String   // basic-auth peer e.g. "user:tony"
+  processedAt     DateTime?
+  processedRunId  String?  // links to skill-side audit_runs.id when consumed
+  notes           String?
+
+  @@index([kind, uploadedAt(sort: Desc)])
+}

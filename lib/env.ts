@@ -137,6 +137,17 @@ const schema = z.object({
    *  hiccup. Adam's pattern; same here. */
   HONCHO_TIMEOUT_MS: z.coerce.number().int().default(4000),
 
+  // ── CSV import endpoint (read by Hermes skills, not by Mark itself) ─
+  /** Public base URL the read-only Hermes skills hit to fetch the latest
+   *  uploaded CSV (e.g. https://mark-agent-production.up.railway.app). Read
+   *  here so the value is documented + visible alongside the rest of Mark's
+   *  config; the skills themselves consume the same env var name. */
+  MARK_IMPORT_BASE_URL: z.string().optional().default(""),
+  /** Basic-auth header value the skills present to GET /api/imports/*.
+   *  Format: "Basic base64(user:pass)". Same caveat — documented here, set
+   *  on the skill side. */
+  MARK_IMPORT_AUTH: z.string().optional().default(""),
+
   // ── Mock mode ────────────────────────────────────────────────────
   /** When on, Mark never calls a specialist — he uses canned fixtures so
    *  the whole brief pipeline is exercisable without the team being up. */
