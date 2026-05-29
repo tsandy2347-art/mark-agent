@@ -15,6 +15,7 @@ import { brisbane } from "../time";
 import { answerQuestion, type QaAttachment, type QaHistoryTurn } from "../anthropic";
 import { env } from "../env";
 import { fetchMarkMemory, formatMemoryAddendum, postTurn } from "../honcho";
+import { listOpenFindingsForQa } from "../hermes-findings";
 import { readLatestMetrics } from "./goals";
 
 interface AskInput {
@@ -62,14 +63,12 @@ export async function askMark(input: AskInput): Promise<AskOutput> {
   const userPeer = input.askedBy || "anonymous";
 
   const [findings, metrics, statuses, memory] = await Promise.all([
-    prisma.ingestedFinding.findMany({
-      where: {
-        resolved: false,
-        ...(includeRestricted ? {} : { isPeopleFlag: false }),
-      },
-      orderBy: [{ severity: "asc" }, { at: "desc" }],
-      take: 400,
-    }),
+    // Pull directly from the shared hermes-jbc findings DB — the table every
+    // Hermes skill writes to. We bypass Mark's local IngestedFinding mirror
+    // because the legacy specialist /api/findings poll cycle has been
+    // decommissioned in Phase 2 of the consolidation plan. Skills write
+    // direct, Mark reads direct, no middle layer.
+    listOpenFindingsForQa({ includePeopleFlag: includeRestricted, limit: 400 }),
     readLatestMetrics(),
     prisma.specialistRunStatus.findMany(),
     input.sessionId
@@ -92,25 +91,26 @@ export async function askMark(input: AskInput): Promise<AskOutput> {
   // Cost: ~2-3KB per finding × 400 findings ≈ 1MB of context. Sonnet 4.6's
   // window has plenty of room; this is well worth it for drill-down quality.
   const compactFindings = findings.map((f) => {
-    const fullBody = f.body ?? "";
+    const fullBody = f.detail ?? "";
     const body = fullBody.length > 2500 ? fullBody.slice(0, 2497) + "..." : fullBody;
     return {
-      agent: f.specialistAgent,
+      agent: f.sourceAgent,
       severity: f.severity,
       entity: f.entityCode,
       detector: f.detector,
       title: f.title,
       body,
       bodyTruncated: fullBody.length > 2500,
-      amount: f.amount == null ? null : Number(f.amount),
-      at: f.at.toISOString(),
+      amount: f.amount,
+      at: f.createdAt.toISOString(),
       // Per-detector evidence — Xero deep-links, source ids, narrations etc.
       // Treat as opaque; quote keys verbatim if the user asks for the source.
-      evidence: f.evidenceJson ?? null,
+      evidence: f.evidence ?? null,
       // Specialist's AI explanation of why this matters. May be null.
-      explanation: f.explanation ?? null,
-      // The specialist's bounded suggested next action.
-      suggestedAction: f.suggestedAction ?? null,
+      explanation: f.aiExplanation ?? null,
+      // The shared schema has no suggestedAction column — Mark infers next
+      // action from severity in the system prompt.
+      suggestedAction: null,
     };
   });
 

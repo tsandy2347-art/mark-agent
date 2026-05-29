@@ -53,6 +53,10 @@ export interface HermesFinding {
   aiExplanation: string | null;
   resolved: boolean;
   createdAt: Date;
+  /** jsonb — Xero deep-links, source ids, narrations, dedupKey, etc.
+   *  Mark passes the whole thing through to Claude untouched so the
+   *  agent can quote keys verbatim if asked. */
+  evidence: unknown;
 }
 
 export async function listRecentAuditRuns(limit = 30): Promise<HermesAuditRun[]> {
@@ -83,7 +87,7 @@ export async function listRecentFindings(limit = 30): Promise<HermesFinding[]> {
   const { rows } = await pool().query(
     `SELECT id, source_agent, run_id, detector, domain, severity, entity_code,
             is_people_flag, title, detail, amount, ai_explanation, resolved,
-            created_at
+            created_at, evidence
        FROM findings
        ORDER BY created_at DESC
        LIMIT $1`,
@@ -104,6 +108,59 @@ export async function listRecentFindings(limit = 30): Promise<HermesFinding[]> {
     aiExplanation: r.ai_explanation,
     resolved: r.resolved,
     createdAt: r.created_at,
+    evidence: r.evidence ?? null,
+  }));
+}
+
+/** Open findings for Mark's /qa context. Pulls from the shared
+ *  hermes-jbc findings DB (the table every Hermes skill writes to)
+ *  instead of Mark's local IngestedFinding mirror, so Mark sees the
+ *  latest skill output without a poll cycle in between.
+ *
+ *  Filters: resolved=false, optional people-flag include/exclude,
+ *  ordered by (severity, created_at) so criticals surface first.
+ */
+export async function listOpenFindingsForQa(args: {
+  includePeopleFlag: boolean;
+  limit?: number;
+}): Promise<HermesFinding[]> {
+  if (!hermesConfigured()) return [];
+  const limit = args.limit ?? 400;
+  const whereParts: string[] = ["resolved=false"];
+  if (!args.includePeopleFlag) whereParts.push("is_people_flag=false");
+  const where = whereParts.join(" AND ");
+  const { rows } = await pool().query(
+    `SELECT id, source_agent, run_id, detector, domain, severity, entity_code,
+            is_people_flag, title, detail, amount, ai_explanation, resolved,
+            created_at, evidence
+       FROM findings
+       WHERE ${where}
+       ORDER BY CASE severity
+                  WHEN 'critical' THEN 0
+                  WHEN 'warning'  THEN 1
+                  WHEN 'info'     THEN 2
+                  ELSE 3
+                END,
+                created_at DESC
+       LIMIT $1`,
+    [limit],
+  );
+  return rows.map((r) => ({
+    id: r.id,
+    sourceAgent: r.source_agent,
+    runId: r.run_id,
+    detector: r.detector,
+    domain: r.domain,
+    severity: r.severity,
+    entityCode: r.entity_code,
+    isPeopleFlag: r.is_people_flag,
+    title: r.title,
+    detail: r.detail,
+    amount: r.amount !== null ? Number(r.amount) : null,
+    aiExplanation: r.ai_explanation,
+    resolved: r.resolved,
+    createdAt: r.created_at,
+    evidence: r.evidence ?? null,
   }));
 }
 
