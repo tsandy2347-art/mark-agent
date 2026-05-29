@@ -117,33 +117,57 @@ export async function listRecentFindings(limit = 30): Promise<HermesFinding[]> {
  *  instead of Mark's local IngestedFinding mirror, so Mark sees the
  *  latest skill output without a poll cycle in between.
  *
- *  Filters: resolved=false, optional people-flag include/exclude,
- *  ordered by (severity, created_at) so criticals surface first.
+ *  Filters: resolved=false, optional people-flag include/exclude.
+ *
+ *  Fairness: stratified per source_agent so one noisy specialist (e.g.
+ *  receivables with hundreds of overdue invoices) can't starve the other
+ *  six out of Mark's context window. Each source_agent contributes at
+ *  most `perAgentCap` findings, severity-ordered (critical > warning >
+ *  info). After the per-agent cut, the union is clipped to `limit`.
  */
 export async function listOpenFindingsForQa(args: {
   includePeopleFlag: boolean;
   limit?: number;
+  perAgentCap?: number;
 }): Promise<HermesFinding[]> {
   if (!hermesConfigured()) return [];
   const limit = args.limit ?? 400;
+  const perAgentCap = args.perAgentCap ?? 80;
   const whereParts: string[] = ["resolved=false"];
   if (!args.includePeopleFlag) whereParts.push("is_people_flag=false");
   const where = whereParts.join(" AND ");
+  // ROW_NUMBER() per source_agent keeps each specialist's top-N regardless
+  // of total volume. Final sort is global severity-then-recency.
   const { rows } = await pool().query(
-    `SELECT id, source_agent, run_id, detector, domain, severity, entity_code,
-            is_people_flag, title, detail, amount, ai_explanation, resolved,
-            created_at, evidence
-       FROM findings
-       WHERE ${where}
-       ORDER BY CASE severity
-                  WHEN 'critical' THEN 0
-                  WHEN 'warning'  THEN 1
-                  WHEN 'info'     THEN 2
-                  ELSE 3
-                END,
-                created_at DESC
-       LIMIT $1`,
-    [limit],
+    `WITH ranked AS (
+       SELECT id, source_agent, run_id, detector, domain, severity, entity_code,
+              is_people_flag, title, detail, amount, ai_explanation, resolved,
+              created_at, evidence,
+              ROW_NUMBER() OVER (
+                PARTITION BY source_agent
+                ORDER BY
+                  CASE severity
+                    WHEN 'critical' THEN 0
+                    WHEN 'warning'  THEN 1
+                    WHEN 'info'     THEN 2
+                    ELSE 3
+                  END,
+                  created_at DESC
+              ) AS rn
+         FROM findings
+         WHERE ${where}
+     )
+     SELECT * FROM ranked
+      WHERE rn <= $1
+      ORDER BY CASE severity
+                 WHEN 'critical' THEN 0
+                 WHEN 'warning'  THEN 1
+                 WHEN 'info'     THEN 2
+                 ELSE 3
+               END,
+               created_at DESC
+      LIMIT $2`,
+    [perAgentCap, limit],
   );
   return rows.map((r) => ({
     id: r.id,
