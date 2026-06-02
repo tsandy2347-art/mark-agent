@@ -1,5 +1,7 @@
 [phases.setup]
-nixPkgs = ["nodejs_22", "npm-10_x", "openssl"]
+# python3 added for the deterministic MYOB payroll-journal parser
+# (scripts/payroll/parse_myob_payroll.py — pure stdlib, no pip deps).
+nixPkgs = ["nodejs_22", "npm-10_x", "openssl", "python311"]
 
 [phases.install]
 cmds = ["npm ci --no-audit --no-fund"]
