@@ -203,6 +203,55 @@ model AlertDelivery {
 }
 
 /**
+ * 13-week rolling cash forecast input — one row per "as-of" snapshot Tony saves.
+ *
+ * Mark's only manager-level cash view. It is TYPED-IN, not auto-pulled:
+ *  - Bank balances are typed by Tony (Xero BankSummary shows reconciled, not
+ *    live cash — it lies for forecasting).
+ *  - Money owed (AR) is entered by debtor TYPE, because Xero due dates are
+ *    useless for NDIS/SaH (DueDate = invoice creation, not payment cycle).
+ *    Each type collects on its own cadence (NDIA ~10d, plan mgr ~30d,
+ *    self-managed ~14d, hospitals ~30d, private ~21d).
+ *  - Outflows: weekly payroll + super (quarterly bursts) + PAYG (SC weekly,
+ *    CQ monthly) + AP (open + weekly run) + ATO payment plan.
+ *
+ * The forecast itself is computed on the fly from the latest row (see
+ * lib/cash-forecast.ts) — only the inputs are stored. Append-only: each save
+ * is a new row, newest asOfDate wins.
+ */
+model CashForecastInput {
+  id                     String   @id @default(cuid())
+  asOfDate               DateTime @db.Date
+  // Bank (typed-in, live)
+  westpacBalance         Decimal  @db.Decimal(14, 2)
+  stGeorgeBalance        Decimal  @db.Decimal(14, 2)
+  otherCashBalance       Decimal  @default(0) @db.Decimal(14, 2)
+  // Money owed, by debtor type
+  ndiaOutstanding        Decimal  @default(0) @db.Decimal(14, 2)
+  planManagerOutstanding Decimal  @default(0) @db.Decimal(14, 2)
+  selfManagedOutstanding Decimal  @default(0) @db.Decimal(14, 2)
+  hospitalsOutstanding   Decimal  @default(0) @db.Decimal(14, 2)
+  privateOutstanding     Decimal  @default(0) @db.Decimal(14, 2)
+  sahReceiptsMonthly     Decimal  @default(0) @db.Decimal(14, 2)
+  // Outflows
+  apOpenBalance          Decimal  @default(0) @db.Decimal(14, 2)
+  apWeeklyRun            Decimal  @default(0) @db.Decimal(14, 2)
+  atoArrearsBalance      Decimal  @default(0) @db.Decimal(14, 2)
+  atoMonthlyPaymentPlan  Decimal  @default(0) @db.Decimal(14, 2)
+  weeklyPayrollGross     Decimal  @db.Decimal(14, 2)
+  weeklyEmployerSuper    Decimal  @db.Decimal(14, 2)
+  weeklyPaygSc           Decimal  @db.Decimal(14, 2)
+  monthlyPaygCq          Decimal  @db.Decimal(14, 2)
+  // Alerts
+  minimumBalanceAlert    Decimal  @default(500000) @db.Decimal(14, 2)
+  notes                  String   @default("")
+  savedBy                String   @default("") // basic-auth username, audit
+  createdAt              DateTime @default(now())
+
+  @@index([asOfDate(sort: Desc)])
+}
+
+/**
  * Raw source-file uploads that Mark holds for the read-only Hermes skills.
  *
  * Tony / Lindsay drop MYOB pay exports + AlayaCare service-delivery exports

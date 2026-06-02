@@ -25,6 +25,7 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
             <Link href="/imports" className="appbar-link">Imports</Link>
             <Link href="/hermes-activity" className="appbar-link">Hermes</Link>
             <Link href="/goals" className="appbar-link">Goals</Link>
+            <Link href="/cash-forecast" className="appbar-link">Cash forecast</Link>
             <Link href="/qa" className="appbar-link">Ask Mark</Link>
             <Link href="/restricted" className="appbar-link">Restricted</Link>
           </nav>
