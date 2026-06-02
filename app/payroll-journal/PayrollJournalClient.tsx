@@ -4,7 +4,7 @@
 
 "use client";
 
-import { useState } from "react";
+import { useState, useCallback } from "react";
 
 interface JournalLine {
   AccountCode?: string;
@@ -126,21 +126,16 @@ export function PayrollJournalClient() {
       {/* File pickers */}
       <div className="card" style={{ marginBottom: 16 }}>
         <h2 style={{ marginTop: 0 }}>MYOB exports</h2>
-        <p className="muted" style={{ fontSize: 12 }}>All three .xlsx files required.</p>
-        <div style={{ display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: 12, marginTop: 10 }}>
+        <p className="muted" style={{ fontSize: 12 }}>All three .xlsx files required. Drag &amp; drop or click to browse.</p>
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: 12, marginTop: 12 }}>
           {(Object.keys(FILE_HINTS) as FileKey[]).map((key) => (
-            <div key={key}>
-              <label className="field-label">{FILE_HINTS[key].label}</label>
-              <input
-                type="file"
-                accept=".xlsx"
-                onChange={(e) => setFiles((f) => ({ ...f, [key]: e.target.files?.[0] ?? null }))}
-                style={{ width: "100%", fontSize: 12, marginTop: 4 }}
-              />
-              <div className="muted" style={{ fontSize: 11, marginTop: 4 }}>
-                {files[key] ? `✓ ${files[key]!.name}` : FILE_HINTS[key].nudge}
-              </div>
-            </div>
+            <FileDrop
+              key={key}
+              label={FILE_HINTS[key].label}
+              nudge={FILE_HINTS[key].nudge}
+              file={files[key]}
+              onChange={(f) => setFiles((prev) => ({ ...prev, [key]: f }))}
+            />
           ))}
         </div>
         <div style={{ display: "flex", gap: 8, marginTop: 14 }}>
@@ -213,5 +208,95 @@ function JournalTable({ title, result }: { title: string; result: TenantResult }
         </tbody>
       </table>
     </div>
+  );
+}
+
+function FileDrop({
+  label,
+  nudge,
+  file,
+  onChange,
+}: {
+  label: string;
+  nudge: string;
+  file: File | null;
+  onChange: (f: File | null) => void;
+}) {
+  const [dragOver, setDragOver] = useState(false);
+  const inputId = `drop-${label.replace(/\W+/g, "-").toLowerCase()}`;
+
+  const onDrop = useCallback(
+    (e: React.DragEvent<HTMLLabelElement>) => {
+      e.preventDefault();
+      setDragOver(false);
+      const dropped = e.dataTransfer.files?.[0];
+      if (dropped && dropped.name.toLowerCase().endsWith(".xlsx")) onChange(dropped);
+    },
+    [onChange],
+  );
+
+  return (
+    <label
+      htmlFor={inputId}
+      onDragOver={(e) => {
+        e.preventDefault();
+        setDragOver(true);
+      }}
+      onDragLeave={() => setDragOver(false)}
+      onDrop={onDrop}
+      style={{
+        display: "block",
+        cursor: "pointer",
+        border: "2px dashed",
+        borderColor: dragOver
+          ? "var(--amber, #f59e0b)"
+          : file
+            ? "var(--emerald, #34d399)"
+            : "var(--border, #cbd5e1)",
+        borderRadius: 10,
+        background: dragOver
+          ? "rgba(245,158,11,0.08)"
+          : file
+            ? "rgba(52,211,153,0.08)"
+            : "rgba(148,163,184,0.05)",
+        padding: "22px 16px",
+        minHeight: 120,
+        transition: "all 0.15s",
+      }}
+    >
+      <input
+        id={inputId}
+        type="file"
+        accept=".xlsx"
+        style={{ position: "absolute", width: 1, height: 1, opacity: 0, overflow: "hidden" }}
+        onChange={(e) => onChange(e.target.files?.[0] ?? null)}
+      />
+      <div style={{ fontWeight: 600, fontSize: 14, marginBottom: 6 }}>{label}</div>
+      {file ? (
+        <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+          <span style={{ color: "var(--emerald, #34d399)", fontSize: 18 }}>✓</span>
+          <span style={{ fontSize: 13, wordBreak: "break-all" }}>{file.name}</span>
+          <button
+            type="button"
+            onClick={(e) => {
+              e.preventDefault();
+              onChange(null);
+            }}
+            style={{ marginLeft: "auto", background: "transparent", border: "none", cursor: "pointer", fontSize: 16, color: "var(--fg-muted, #94a3b8)" }}
+            aria-label="Remove file"
+          >
+            ✕
+          </button>
+        </div>
+      ) : (
+        <>
+          <div style={{ fontSize: 28, opacity: 0.4, marginBottom: 6 }}>⬆</div>
+          <div className="muted" style={{ fontSize: 12 }}>{nudge}</div>
+          <div className="muted" style={{ fontSize: 11, marginTop: 6, opacity: 0.7 }}>
+            Drag &amp; drop or click to browse
+          </div>
+        </>
+      )}
+    </label>
   );
 }
