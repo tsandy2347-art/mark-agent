@@ -252,6 +252,31 @@ model CashForecastInput {
 }
 
 /**
+ * One uploaded SET of the three MYOB exports for a payroll journal run, kept
+ * together so the payroll agent (in the brain) can fetch the exact same set it
+ * will post from. Stored when Tony previews on /payroll-journal; fetched by the
+ * brain over HTTP at post time (same pattern as CsvImport / the imports API).
+ * Append-only — each preview is a new set, newest wins.
+ */
+model PayrollUpload {
+  id             String   @id @default(cuid())
+  summaryName    String
+  summaryBytes   Bytes
+  dataName       String
+  dataBytes      Bytes
+  detailName     String
+  detailBytes    Bytes
+  // Snapshot of the parsed preview (meta + totals) for audit / display.
+  previewJson    Json?
+  posted         Boolean  @default(false)
+  postedAt       DateTime?
+  uploadedBy     String   @default("")
+  createdAt      DateTime @default(now())
+
+  @@index([createdAt(sort: Desc)])
+}
+
+/**
  * Raw source-file uploads that Mark holds for the read-only Hermes skills.
  *
  * Tony / Lindsay drop MYOB pay exports + AlayaCare service-delivery exports

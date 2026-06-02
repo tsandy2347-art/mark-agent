@@ -35,6 +35,10 @@ interface ParserResult {
   sc: TenantResult | null;
   cq: TenantResult | null;
   totals: { payg_combined: number; super_combined: number; net_combined: number };
+  posted?: {
+    sc: { ManualJournalID?: string; xero_link?: string; TotalDR?: number; error?: string } | null;
+    cq: { ManualJournalID?: string; xero_link?: string; TotalDR?: number; error?: string } | null;
+  };
 }
 
 type FileKey = "summary" | "data" | "detail";
@@ -53,6 +57,10 @@ export function PayrollJournalClient() {
   const [loading, setLoading] = useState(false);
   const [result, setResult] = useState<ParserResult | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [uploadId, setUploadId] = useState<string | null>(null);
+  const [posting, setPosting] = useState(false);
+  const [postResult, setPostResult] = useState<ParserResult | null>(null);
+  const [postError, setPostError] = useState<string | null>(null);
 
   const allPresent = files.summary && files.data && files.detail;
 
@@ -61,6 +69,9 @@ export function PayrollJournalClient() {
     setLoading(true);
     setError(null);
     setResult(null);
+    setUploadId(null);
+    setPostResult(null);
+    setPostError(null);
     try {
       const fd = new FormData();
       fd.append("summary", files.summary!);
@@ -70,6 +81,7 @@ export function PayrollJournalClient() {
       const json = await res.json();
       if (!res.ok || !json.ok) throw new Error(json.error || `HTTP ${res.status}`);
       setResult(json.result as ParserResult);
+      setUploadId(json.uploadId ?? null);
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     } finally {
@@ -77,10 +89,34 @@ export function PayrollJournalClient() {
     }
   }
 
+  async function postDraft() {
+    if (!uploadId) return;
+    setPosting(true);
+    setPostError(null);
+    setPostResult(null);
+    try {
+      const res = await fetch("/api/payroll-journal/post", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ uploadId }),
+      });
+      const json = await res.json();
+      if (!res.ok || !json.ok) throw new Error(json.error || `HTTP ${res.status}`);
+      setPostResult(json.result as ParserResult);
+    } catch (e) {
+      setPostError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setPosting(false);
+    }
+  }
+
   function reset() {
     setFiles({ summary: null, data: null, detail: null });
     setResult(null);
     setError(null);
+    setUploadId(null);
+    setPostResult(null);
+    setPostError(null);
   }
 
   return (
@@ -167,6 +203,61 @@ export function PayrollJournalClient() {
       {/* Journals */}
       {result?.sc && <JournalTable title="Sunshine Coast Pty Ltd (SC + Wide Bay)" result={result.sc} />}
       {result?.cq && <JournalTable title="Just Better Care CQ Pty Ltd" result={result.cq} />}
+
+      {/* Post-to-Xero step — only after a successful preview, and not if already posted */}
+      {result?.ok && uploadId && !postResult && (
+        <div className="card" style={{ marginBottom: 16 }}>
+          <h2 style={{ marginTop: 0 }}>Create the draft in Xero</h2>
+          <p className="muted" style={{ fontSize: 13 }}>
+            This creates the journals above as <strong>DRAFTS</strong> in Xero (SC and CQ). Nothing is
+            posted to your live books or the ATO — a person still opens Xero and posts the draft the
+            normal way. The draft is built by the exact same parser you just previewed.
+          </p>
+          <button className="btn btn-primary" onClick={postDraft} disabled={posting}>
+            {posting ? "Creating drafts in Xero…" : "Create DRAFTs in Xero"}
+          </button>
+          {postError && (
+            <div style={{ marginTop: 10, color: "var(--rose, #f43f5e)", fontSize: 13 }} className="mono">
+              {postError}
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* Posted result — Xero draft links */}
+      {postResult && (
+        <div className="card" style={{ marginBottom: 16, borderColor: "var(--emerald, #34d399)" }}>
+          <h2 style={{ marginTop: 0, color: "var(--emerald, #34d399)" }}>✓ Drafts created in Xero</h2>
+          <p className="muted" style={{ fontSize: 13 }}>
+            Open each in Xero to review and post. (Draft only — not yet posted to your books.)
+          </p>
+          {(["sc", "cq"] as const).map((t) => {
+            const posted = postResult.posted?.[t] as
+              | { ManualJournalID?: string; xero_link?: string; TotalDR?: number; error?: string }
+              | null;
+            if (!posted) return null;
+            const label = t === "sc" ? "SC + Wide Bay" : "CQ";
+            if (posted.error) {
+              return (
+                <div key={t} style={{ fontSize: 13, marginTop: 6, color: "var(--rose, #f43f5e)" }}>
+                  <strong>{label}:</strong> {posted.error}
+                </div>
+              );
+            }
+            return (
+              <div key={t} style={{ fontSize: 13, marginTop: 6 }}>
+                <strong>{label}:</strong>{" "}
+                {posted.TotalDR != null ? aud(posted.TotalDR) + " · " : ""}
+                {posted.xero_link ? (
+                  <a href={posted.xero_link} target="_blank" rel="noopener noreferrer">Open in Xero →</a>
+                ) : (
+                  <span className="mono">{posted.ManualJournalID}</span>
+                )}
+              </div>
+            );
+          })}
+        </div>
+      )}
     </main>
   );
 }

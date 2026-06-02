@@ -22,6 +22,7 @@ import { spawn } from "node:child_process";
 import { mkdtemp, writeFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
+import { prisma } from "@/lib/prisma";
 
 export const dynamic = "force-dynamic";
 export const maxDuration = 120;
@@ -91,15 +92,35 @@ export async function POST(req: NextRequest) {
   const peer = await currentPeer();
   const dir = await mkdtemp(path.join(tmpdir(), "mark-payroll-"));
   try {
+    const summaryBuf = Buffer.from(await (summary as File).arrayBuffer());
+    const dataBuf = Buffer.from(await (data as File).arrayBuffer());
+    const detailBuf = Buffer.from(await (detail as File).arrayBuffer());
     const summaryPath = path.join(dir, "summary.xlsx");
     const dataPath = path.join(dir, "data.xlsx");
     const detailPath = path.join(dir, "detail.xlsx");
-    await writeFile(summaryPath, Buffer.from(await (summary as File).arrayBuffer()));
-    await writeFile(dataPath, Buffer.from(await (data as File).arrayBuffer()));
-    await writeFile(detailPath, Buffer.from(await (detail as File).arrayBuffer()));
+    await writeFile(summaryPath, summaryBuf);
+    await writeFile(dataPath, dataBuf);
+    await writeFile(detailPath, detailBuf);
 
     const parsed = await runParser(summaryPath, dataPath, detailPath);
-    return NextResponse.json({ ok: true, ranBy: peer, result: parsed });
+
+    // Persist the exact file SET + preview so the payroll agent can later
+    // fetch and post from the same bytes. Append-only; newest wins.
+    const upload = await prisma.payrollUpload.create({
+      data: {
+        summaryName: (summary as File).name,
+        summaryBytes: summaryBuf,
+        dataName: (data as File).name,
+        dataBytes: dataBuf,
+        detailName: (detail as File).name,
+        detailBytes: detailBuf,
+        previewJson: parsed as object,
+        uploadedBy: peer,
+      },
+      select: { id: true },
+    });
+
+    return NextResponse.json({ ok: true, ranBy: peer, uploadId: upload.id, result: parsed });
   } catch (e) {
     return fail(e instanceof Error ? e.message : String(e), 500);
   } finally {

@@ -72,6 +72,13 @@ const schema = z.object({
   /** Bearer key for hermes-jbc /v1/* — matches API_SERVER_KEY on hermes-jbc. */
   HERMES_API_SERVER_KEY: z.string().optional().default(""),
 
+  /** payroll-poster service — the deterministic Xero DRAFT poster. Mark POSTs
+   *  the stored 3-file set here; the poster runs the verified parser with
+   *  --post-draft (DRAFT-locked) and returns the Xero links. Mark holds NO
+   *  Xero keys; the poster does. */
+  PAYROLL_POSTER_URL: z.string().optional().default(""),
+  PAYROLL_POSTER_API_KEY: z.string().optional().default(""),
+
   // ── Anthropic ────────────────────────────────────────────────────
   ANTHROPIC_API_KEY: z.string().optional().default(""),
   ANTHROPIC_MODEL: z.string().default("claude-sonnet-4-6"),
