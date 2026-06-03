@@ -1,0 +1,186 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Mark — JBC Finance Manager (Voice)</title>
+<link href="https://fonts.googleapis.com/css2?family=Syne:wght@400;500;600;700&family=JetBrains+Mono:wght@300;400&display=swap" rel="stylesheet">
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+  :root {
+    --bg: #050810; --surface: #0f1623;
+    --border: rgba(34,211,238,0.15); --cyan: #22d3ee;
+    --cyan-dim: rgba(34,211,238,0.08); --cyan-glow: rgba(34,211,238,0.35);
+    --text: #e8eef7; --text-dim: #8a96ac; --text-muted: #5a6478;
+    --red: #f43f5e; --green: #34d399;
+    --font-display: 'Syne', sans-serif; --font-mono: 'JetBrains Mono', monospace;
+  }
+  html, body { height: 100%; background: var(--bg); color: var(--text); font-family: var(--font-display); overflow: hidden; }
+  body::before { content: ''; position: fixed; inset: 0; background-image: linear-gradient(rgba(34,211,238,0.04) 1px, transparent 1px), linear-gradient(90deg, rgba(34,211,238,0.04) 1px, transparent 1px); background-size: 60px 60px; pointer-events: none; z-index: 0; }
+  body::after { content: ''; position: fixed; inset: 0; background: radial-gradient(ellipse at center, transparent 30%, var(--bg) 100%); pointer-events: none; z-index: 0; }
+  .app { position: relative; z-index: 1; height: 100vh; display: flex; flex-direction: column; align-items: center; justify-content: center; padding: 2rem; gap: 0; }
+  .top-label { font-family: var(--font-mono); font-size: 11px; letter-spacing: 0.2em; color: var(--text-muted); text-transform: uppercase; margin-bottom: 1.5rem; }
+  .orb-wrap { position: relative; width: 160px; height: 160px; margin-bottom: 1.5rem; }
+  .orb { width: 160px; height: 160px; border-radius: 50%; background: radial-gradient(circle at 35% 35%, #14384a, #050810 70%); border: 1px solid rgba(34,211,238,0.2); display: flex; align-items: center; justify-content: center; transition: border-color 0.3s; }
+  .orb.active { border-color: rgba(34,211,238,0.6); }
+  .orb-letter { font-size: 56px; font-weight: 700; color: #aef0fb; line-height: 1; user-select: none; }
+  .ring { position: absolute; border-radius: 50%; border: 1px solid var(--cyan); opacity: 0; top: 50%; left: 50%; transform: translate(-50%,-50%); pointer-events: none; }
+  .ring.active { animation: ringPulse 2s ease-out infinite; }
+  .ring2.active { animation-delay: 0.7s; }
+  .ring3.active { animation-delay: 1.4s; }
+  @keyframes ringPulse { 0% { width: 160px; height: 160px; opacity: 0.6; } 100% { width: 300px; height: 300px; opacity: 0; } }
+  .name { font-size: 32px; font-weight: 700; letter-spacing: -0.02em; color: var(--text); margin-bottom: 0.3rem; }
+  .role { font-family: var(--font-mono); font-size: 11px; letter-spacing: 0.12em; color: var(--text-dim); text-transform: uppercase; margin-bottom: 1.5rem; }
+  .status { font-family: var(--font-mono); font-size: 13px; color: var(--text-dim); min-height: 20px; margin-bottom: 1.5rem; display: flex; align-items: center; gap: 8px; }
+  .status-dot { width: 6px; height: 6px; border-radius: 50%; background: var(--text-muted); flex-shrink: 0; transition: background 0.3s; }
+  .status-dot.on { background: var(--green); box-shadow: 0 0 8px var(--green); }
+  .status-dot.talking { background: var(--cyan); box-shadow: 0 0 8px var(--cyan); animation: blink 1s ease infinite; }
+  @keyframes blink { 0%,100% { opacity: 1; } 50% { opacity: 0.3; } }
+  .btn-row { display: flex; gap: 12px; margin-bottom: 1.5rem; }
+  .btn { padding: 12px 32px; border-radius: 4px; font-family: var(--font-display); font-size: 14px; font-weight: 600; letter-spacing: 0.05em; cursor: pointer; border: 1px solid; transition: all 0.2s; display: flex; align-items: center; gap: 10px; text-transform: uppercase; }
+  .btn-call { background: transparent; border-color: var(--cyan); color: var(--cyan); }
+  .btn-call:hover:not(:disabled) { background: var(--cyan-dim); box-shadow: 0 0 20px var(--cyan-glow); }
+  .btn-call:disabled { opacity: 0.3; cursor: not-allowed; }
+  .btn-end { background: transparent; border-color: var(--red); color: var(--red); display: none; }
+  .btn-end:hover { background: rgba(244,63,94,0.08); }
+  .links { display: flex; gap: 14px; margin-bottom: 1.25rem; }
+  .links a { font-family: var(--font-mono); font-size: 11px; letter-spacing: 0.1em; color: var(--text-dim); text-transform: uppercase; text-decoration: none; border: 1px solid var(--border); padding: 6px 12px; border-radius: 4px; transition: all 0.2s; }
+  .links a:hover { color: var(--cyan); border-color: var(--cyan); }
+  .transcript-wrap { width: 100%; max-width: 520px; background: var(--surface); border: 1px solid var(--border); border-radius: 4px; overflow: hidden; }
+  .transcript-header { padding: 8px 16px; border-bottom: 1px solid var(--border); font-family: var(--font-mono); font-size: 10px; letter-spacing: 0.15em; color: var(--text-muted); text-transform: uppercase; display: flex; align-items: center; gap: 8px; }
+  .transcript-body { padding: 14px 16px; max-height: 140px; overflow-y: auto; font-family: var(--font-mono); font-size: 12px; line-height: 1.7; color: var(--text-dim); }
+  .line { margin-bottom: 6px; }
+  .line .who { font-weight: 400; margin-right: 8px; }
+  .line.user .who { color: var(--text); }
+  .line.assistant .who { color: var(--cyan); }
+</style>
+</head>
+<body>
+<div class="app">
+  <div class="top-label">JBC Finance // Mark Voice Interface v1.0</div>
+  <div class="orb-wrap">
+    <div class="ring" id="ring1"></div>
+    <div class="ring ring2" id="ring2"></div>
+    <div class="ring ring3" id="ring3"></div>
+    <div class="orb" id="orb"><span class="orb-letter">M</span></div>
+  </div>
+  <div class="name">Mark</div>
+  <div class="role">Finance Manager</div>
+  <div class="status">
+    <div class="status-dot" id="statusDot"></div>
+    <span id="statusText">Ready when you are.</span>
+  </div>
+
+  <div class="btn-row">
+    <button class="btn btn-call" id="startBtn" onclick="startCall()">&#9679; Talk to Mark</button>
+    <button class="btn btn-end" id="endBtn" onclick="endCall()">&#9632; End Call</button>
+  </div>
+  <div class="links">
+    <a href="/reports/profit">Profit report</a>
+    <a href="/cash-forecast">Cash</a>
+    <a href="/qa">Ask Mark (type)</a>
+  </div>
+  <div class="transcript-wrap">
+    <div class="transcript-header">
+      <span id="tDot" style="width:6px;height:6px;border-radius:50%;background:#5a6478;display:inline-block;"></span>
+      Live Transcript
+    </div>
+    <div class="transcript-body" id="transcriptBody">
+      <div id="placeholder" style="color:#5a6478;">Awaiting connection...</div>
+    </div>
+  </div>
+</div>
+
+<script type="module">
+  import Vapi from 'https://esm.sh/@vapi-ai/web';
+
+  // Fleet-wide Vapi PUBLIC key (safe to embed — allows starting fleet assistants).
+  const VAPI_KEY = 'f2f527a9-55ba-49b3-9aed-43bd5aa390bd';
+  // "Mark the Money Man" assistant — wired to Mark's voice brain + George (posh British) voice.
+  const ASSISTANT_ID = '3f71f284-1702-4d30-9df5-ec1ece7c38fb';
+
+  let vapi = null;
+
+  function setStatus(text, mode) {
+    document.getElementById('statusText').textContent = text;
+    const dot = document.getElementById('statusDot');
+    dot.className = 'status-dot' + (mode ? ' ' + mode : '');
+  }
+
+  function setRings(active) {
+    document.getElementById('ring1').className = 'ring' + (active ? ' active' : '');
+    document.getElementById('ring2').className = 'ring ring2' + (active ? ' active' : '');
+    document.getElementById('ring3').className = 'ring ring3' + (active ? ' active' : '');
+    document.getElementById('orb').className = 'orb' + (active ? ' active' : '');
+  }
+
+  function addLine(role, text) {
+    const body = document.getElementById('transcriptBody');
+    const ph = document.getElementById('placeholder');
+    if (ph) ph.remove();
+    const div = document.createElement('div');
+    div.className = 'line ' + role;
+    div.innerHTML = `<span class="who">${role === 'user' ? 'You' : 'Mark'}:</span>${text}`;
+    body.appendChild(div);
+    body.scrollTop = body.scrollHeight;
+  }
+
+  async function startCall() {
+    document.getElementById('startBtn').disabled = true;
+    setStatus('Connecting Mark...', '');
+
+    try {
+      vapi = new Vapi(VAPI_KEY);
+
+      vapi.on('call-start', () => {
+        setStatus('Connected — speak now', 'on');
+        setRings(true);
+        document.getElementById('startBtn').style.display = 'none';
+        document.getElementById('endBtn').style.display = 'flex';
+        document.getElementById('tDot').style.background = '#34d399';
+      });
+
+      vapi.on('call-end', () => {
+        setStatus('Call ended. Talk again anytime.', '');
+        setRings(false);
+        document.getElementById('startBtn').style.display = 'flex';
+        document.getElementById('startBtn').disabled = false;
+        document.getElementById('endBtn').style.display = 'none';
+        document.getElementById('tDot').style.background = '#5a6478';
+      });
+
+      vapi.on('speech-start', () => setStatus('Mark is speaking...', 'talking'));
+      vapi.on('speech-end', () => setStatus('Listening — speak now', 'on'));
+
+      vapi.on('message', msg => {
+        if (msg.type === 'transcript' && msg.transcriptType === 'final') {
+          addLine(msg.role, msg.transcript);
+        }
+      });
+
+      vapi.on('error', err => {
+        const detail = err && (err.errorMsg || (err.error && err.error.msg) || err.message) || JSON.stringify(err).slice(0, 80);
+        setStatus('Error: ' + detail, '');
+        document.getElementById('startBtn').disabled = false;
+        setRings(false);
+        console.error('VAPI error:', err);
+      });
+
+      await vapi.start(ASSISTANT_ID);
+
+    } catch(e) {
+      setStatus('Failed: ' + e.message, '');
+      document.getElementById('startBtn').disabled = false;
+      console.error('Start error:', e);
+    }
+  }
+
+  function endCall() {
+    if (vapi) { vapi.stop(); vapi = null; }
+  }
+
+  window.startCall = startCall;
+  window.endCall = endCall;
+</script>
+</body>
+</html>
