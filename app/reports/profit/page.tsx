@@ -58,24 +58,26 @@ export default async function ProfitReportPage() {
   const cqMap = byMonth(fin.CQ);
 
   // A month is "faded" (arrears-distorted) if either entity flags it partial,
-  // OR it is the single most-recent completed month (under-booked income).
+  // OR it is the single most-recent completed month (income under-booked until
+  // invoicing catches up — memory rule: current + most-recent completed month
+  // both show a false loss).
   const partialIdx = new Set<number>();
   months.forEach((m, i) => {
     const sc = scMap.get(m);
     const cq = cqMap.get(m);
     if (sc?.partialMonthToDate || cq?.partialMonthToDate) partialIdx.add(i);
   });
-  // last fully-settled = last index NOT partial; the one after the last
-  // settled (i.e. most recent completed) is also suspect → fade it too.
-  const lastSettledIdx = [...months.keys()].filter((i) => !partialIdx.has(i)).pop();
-  if (lastSettledIdx != null) {
-    // fade everything AFTER the last settled month as well
-    for (let i = lastSettledIdx + 1; i < months.length; i++) partialIdx.add(i);
-    // and fade the last settled month itself if there is a partial after it
-    // (most-recent completed = arrears-light). Conservative: fade lastSettled.
-    partialIdx.add(lastSettledIdx);
+  // The most-recent completed (non-partial) month is also arrears-distorted —
+  // fade it and everything after it.
+  const lastNonPartial = [...months.keys()].filter((i) => !partialIdx.has(i)).pop();
+  if (lastNonPartial != null) {
+    for (let i = lastNonPartial; i < months.length; i++) partialIdx.add(i);
   }
   const faded = [...partialIdx];
+
+  // The trustworthy headline = the last month that is NOT faded (last fully
+  // settled month — April in the current data).
+  const lastSettledIdx = [...months.keys()].filter((i) => !partialIdx.has(i)).pop();
 
   const cats = months.map(monthShort);
   const W = 720;
