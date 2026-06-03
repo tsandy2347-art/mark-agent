@@ -119,28 +119,29 @@ export async function askMark(input: AskInput): Promise<AskOutput> {
     };
   });
 
+  // Compact P&L summary that MUST survive truncation — the findings payload
+  // below can be ~700KB and the brain backend truncates long input, which is
+  // why financials buried inside `data` never reached Mark. We hoist it into
+  // priorityData (rendered at the very top of the prompt).
+  const financialsBlock = financials.ok
+    ? {
+        note:
+          "Per-entity Profit & Loss from Xero (AUD). SC and CQ are SEPARATE legal " +
+          "entities/taxpayers — 'consolidated' is a management sum only, NEVER " +
+          "statutory. CRITICAL ARREARS CAVEAT: JBC bills most care in arrears, so " +
+          "any month with partialMonthToDate=true (the current month) AND the single " +
+          "most-recent completed month are UNDER-BOOKED on income and will show a " +
+          "FALSE loss. Do NOT report a recent-month loss as real — explain the lag " +
+          "and cite the last FULLY-settled month as the trustworthy figure.",
+        SC: financials.SC?.months ?? null,
+        CQ: financials.CQ?.months ?? null,
+        consolidated: financials.consolidated ?? null,
+      }
+    : { unavailable: true, reason: financials.error };
+
   const data = {
     findings: compactFindings,
     goalMetrics: metrics,
-    // Live company P&L per entity (SC, CQ) + a management-only consolidated
-    // sum, last 4 months and current month-to-date, straight from Xero.
-    // Use these for ANY profit / income / expenses / net profit question.
-    financials: financials.ok
-      ? {
-          note:
-            "Per-entity Profit & Loss from Xero. netProfit/totalIncome are in AUD. " +
-            "SC and CQ are SEPARATE legal entities/taxpayers — 'consolidated' is a " +
-            "management sum only, NEVER a statutory figure. CRITICAL ARREARS CAVEAT: " +
-            "JBC bills most care in arrears, so any month flagged partialMonthToDate=true " +
-            "(the current month) AND the single most-recent completed month are " +
-            "UNDER-BOOKED on income — invoicing hasn't caught up — and will look like a " +
-            "false 'loss'. Do NOT report a recent-month loss as real; explain the lag and " +
-            "point to the last FULLY-settled month as the trustworthy figure.",
-          SC: financials.SC?.months ?? null,
-          CQ: financials.CQ?.months ?? null,
-          consolidated: financials.consolidated ?? null,
-        }
-      : { unavailable: true, reason: financials.error },
     specialistHealth: statuses.map((s) => ({
       agent: s.agent,
       status: s.lastRunStatus,
@@ -153,6 +154,7 @@ export async function askMark(input: AskInput): Promise<AskOutput> {
     question: input.question,
     dataAsOf,
     data,
+    priorityData: financialsBlock,
     attachments: input.attachments,
     history: input.history,
     memoryAddendum: formatMemoryAddendum(memory),

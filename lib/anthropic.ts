@@ -556,6 +556,12 @@ interface QaInput {
   question: string;
   dataAsOf: string;
   data: unknown;
+  /** High-priority structured data rendered at the TOP of the prompt, BEFORE
+   *  the (potentially very large) `data` payload. Use for compact, must-not-be-
+   *  lost figures — e.g. the per-entity P&L — that would otherwise sit behind
+   *  hundreds of KB of findings JSON and risk being truncated by the model
+   *  backend. Keep it small. */
+  priorityData?: unknown;
   /** Optional files the user uploaded (PDFs / images / spreadsheets). All
    *  attachments are bound to the FIRST user message of the conversation so
    *  they persist in context across follow-up turns. */
@@ -781,6 +787,10 @@ export async function answerQuestion(input: QaInput): Promise<QaOutput> {
       `Question from a team member: ${input.question}\n\n` +
       attachmentNote +
       `Data as of: ${input.dataAsOf}\n\n` +
+      (input.priorityData !== undefined && input.priorityData !== null
+        ? `KEY FIGURES (authoritative — read these FIRST; they will not be truncated):\n` +
+          `${JSON.stringify(input.priorityData)}\n\n`
+        : "") +
       `Structured data you may use to answer (only use figures present here — ` +
       `if the answer is not in here, say so):\n` +
       `${JSON.stringify(input.data)}\n\n` +
