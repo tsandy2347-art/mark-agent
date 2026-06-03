@@ -69,6 +69,7 @@ export type EntityAssumptions = {
   monthlyPaygCq: number; // CQ: monthly PAYG due 21st. SC: leave 0.
   apWeeklyRun: number; // ongoing weekly bills beyond the open AP balance
   atoMonthlyPaymentPlan: number; // ATO arrears instalment (CQ ~$956)
+  weeklyIncome: number; // ongoing money-IN run rate (P&L Total Income / 12wk avg)
 };
 
 // Everything we hold for ONE entity in a saved snapshot.
@@ -114,6 +115,7 @@ export type ForecastWeek = {
   weekEnding: string;
   openingBalance: number;
   arByType: Record<DebtorType, number>;
+  ongoingIncome: number;
   totalInflows: number;
   payrollGross: number;
   paygScWeekly: number;
@@ -269,6 +271,18 @@ function buildEntityForecast(
     }
   }
 
+  // Ongoing weekly income (P&L run-rate). Starts landing after a 2-week
+  // collection lag so it doesn't double-count today's AR backlog, which already
+  // lands across the first weeks per cadence. Weeks 1-2 rely on current AR;
+  // week 3 onward picks up the steady-state earned-and-collected run rate.
+  const INCOME_COLLECTION_LAG_WEEKS = 2;
+  const ongoingIncomeByWeek = new Array(13).fill(0);
+  if (a.weeklyIncome > 0) {
+    for (let i = INCOME_COLLECTION_LAG_WEEKS; i < 13; i++) {
+      ongoingIncomeByWeek[i] = a.weeklyIncome;
+    }
+  }
+
   const weeks: ForecastWeek[] = [];
   let running = startingCash;
   for (let i = 0; i < 13; i++) {
@@ -282,6 +296,8 @@ function buildEntityForecast(
       arByType[t] = arWeeks[t][i];
       totalIn += arWeeks[t][i];
     }
+    const ongoing = ongoingIncomeByWeek[i];
+    totalIn += ongoing;
 
     const payroll = a.weeklyPayrollGross;
     const paygSc = a.weeklyPaygSc;
@@ -301,6 +317,7 @@ function buildEntityForecast(
     if (paygCq > 0) notes.push(`CQ PAYG due ($${fmt(paygCq)})`);
     if (superQ > 0) notes.push(`Quarterly super due ($${fmt(superQ)})`);
     if (ato > 0) notes.push(`ATO payment plan ($${fmt(ato)})`);
+    if (ongoing > 0) notes.push(`Ongoing income ($${fmt(ongoing)})`);
 
     const arRounded = emptyArByType();
     for (const t of DEBTOR_TYPES) arRounded[t] = round2(arByType[t]);
@@ -311,6 +328,7 @@ function buildEntityForecast(
       weekEnding: isoDate(wkEnd),
       openingBalance: round2(openingBalance),
       arByType: arRounded,
+      ongoingIncome: round2(ongoing),
       totalInflows: round2(totalIn),
       payrollGross: round2(payroll),
       paygScWeekly: round2(paygSc),
@@ -385,6 +403,7 @@ function combineForecasts(
       weekEnding: a.weekEnding,
       openingBalance: opening,
       arByType,
+      ongoingIncome: round2(a.ongoingIncome + b.ongoingIncome),
       totalInflows: round2(a.totalInflows + b.totalInflows),
       payrollGross: round2(a.payrollGross + b.payrollGross),
       paygScWeekly: round2(a.paygScWeekly + b.paygScWeekly),
@@ -432,6 +451,7 @@ export function emptyEntityState(): EntityState {
       monthlyPaygCq: 0,
       apWeeklyRun: 0,
       atoMonthlyPaymentPlan: 0,
+      weeklyIncome: 0,
     },
   };
 }

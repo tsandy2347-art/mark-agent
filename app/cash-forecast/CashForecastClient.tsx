@@ -43,6 +43,7 @@ type PullTenant = {
   apTotal: number;
   arInvoiceCount: number;
   apBillCount: number;
+  weeklyIncomeEstimate: number;
 };
 
 export function CashForecastClient({
@@ -87,6 +88,11 @@ export function CashForecastClient({
         ent.bankAccounts = t.bankAccounts;
         for (const dt of DEBTOR_TYPES) ent.ar[dt] = t.ar[dt] ?? 0;
         ent.apOpenBalance = t.apTotal;
+        // Auto-fill the ongoing weekly income from Xero's last-12-week P&L.
+        // It's an estimate — Tony can nudge it after pulling.
+        if (t.weeklyIncomeEstimate > 0) {
+          ent.assumptions.weeklyIncome = t.weeklyIncomeEstimate;
+        }
       }
       next.pulledAt = new Date().toISOString();
       recompute(next);
@@ -410,6 +416,23 @@ function EntityEditor({
       <p className="muted" style={{ fontSize: 12 }}>
         Total owed to you: <strong>{aud(arTotal)}</strong> · Bills you owe:{" "}
         <strong>{aud(entity.apOpenBalance)}</strong>
+      </p>
+
+      {/* Ongoing income — auto-estimated from Xero, nudgeable */}
+      <h3 className="muted" style={subhead}>
+        Typical money coming in each week
+      </h3>
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: 10 }}>
+        <NumField
+          label="Typical weekly income"
+          value={entity.assumptions.weeklyIncome}
+          onChange={(v) => onAssumption("weeklyIncome", v)}
+        />
+      </div>
+      <p className="muted" style={{ fontSize: 12 }}>
+        Auto-estimated from your last 12 weeks of income in Xero. This is the
+        ongoing money-in that keeps the forecast realistic after today&apos;s
+        outstanding invoices are collected. Adjust if it looks off.
       </p>
 
       {/* Assumptions — the only typed fields */}

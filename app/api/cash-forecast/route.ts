@@ -67,6 +67,7 @@ function cleanEntity(raw: unknown): EntityState {
     monthlyPaygCq: num(a.monthlyPaygCq),
     apWeeklyRun: num(a.apWeeklyRun),
     atoMonthlyPaymentPlan: num(a.atoMonthlyPaymentPlan),
+    weeklyIncome: num(a.weeklyIncome),
   };
   return base;
 }
