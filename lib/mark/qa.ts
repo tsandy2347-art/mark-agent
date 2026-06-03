@@ -17,6 +17,7 @@ import { env } from "../env";
 import { fetchMarkMemory, formatMemoryAddendum, postTurn } from "../honcho";
 import { listOpenFindingsForQa } from "../hermes-findings";
 import { readLatestMetrics } from "./goals";
+import { fetchFinancials } from "../financials";
 
 interface AskInput {
   askedBy: string;
@@ -62,7 +63,7 @@ export async function askMark(input: AskInput): Promise<AskOutput> {
   const dataAsOf = brisbane(now);
   const userPeer = input.askedBy || "anonymous";
 
-  const [findings, metrics, statuses, memory] = await Promise.all([
+  const [findings, metrics, statuses, memory, financials] = await Promise.all([
     // Pull directly from the shared hermes-jbc findings DB — the table every
     // Hermes skill writes to. We bypass Mark's local IngestedFinding mirror
     // because the legacy specialist /api/findings poll cycle has been
@@ -74,6 +75,10 @@ export async function askMark(input: AskInput): Promise<AskOutput> {
     input.sessionId
       ? fetchMarkMemory({ sessionId: input.sessionId, userPeer })
       : Promise.resolve({ resume: [], memoryBlock: null, disabled: !env.HONCHO_BASE_URL, errored: false }),
+    // Live P&L per entity (last 4 months + month-to-date) from the read-only
+    // poster feed. Lets Mark answer profit / income / expense questions with
+    // real Xero figures. Non-fatal: { ok:false } if the feed is unreachable.
+    fetchFinancials(4),
   ]);
 
   // Findings shape passed to Claude. Previously this was aggressively
@@ -117,6 +122,25 @@ export async function askMark(input: AskInput): Promise<AskOutput> {
   const data = {
     findings: compactFindings,
     goalMetrics: metrics,
+    // Live company P&L per entity (SC, CQ) + a management-only consolidated
+    // sum, last 4 months and current month-to-date, straight from Xero.
+    // Use these for ANY profit / income / expenses / net profit question.
+    financials: financials.ok
+      ? {
+          note:
+            "Per-entity Profit & Loss from Xero. netProfit/totalIncome are in AUD. " +
+            "SC and CQ are SEPARATE legal entities/taxpayers — 'consolidated' is a " +
+            "management sum only, NEVER a statutory figure. CRITICAL ARREARS CAVEAT: " +
+            "JBC bills most care in arrears, so any month flagged partialMonthToDate=true " +
+            "(the current month) AND the single most-recent completed month are " +
+            "UNDER-BOOKED on income — invoicing hasn't caught up — and will look like a " +
+            "false 'loss'. Do NOT report a recent-month loss as real; explain the lag and " +
+            "point to the last FULLY-settled month as the trustworthy figure.",
+          SC: financials.SC?.months ?? null,
+          CQ: financials.CQ?.months ?? null,
+          consolidated: financials.consolidated ?? null,
+        }
+      : { unavailable: true, reason: financials.error },
     specialistHealth: statuses.map((s) => ({
       agent: s.agent,
       status: s.lastRunStatus,
