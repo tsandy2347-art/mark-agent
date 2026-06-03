@@ -277,9 +277,10 @@ function buildEntityForecast(
   // week 3 onward picks up the steady-state earned-and-collected run rate.
   const INCOME_COLLECTION_LAG_WEEKS = 2;
   const ongoingIncomeByWeek = new Array(13).fill(0);
-  if (a.weeklyIncome > 0) {
+  const weeklyIncome = Number(a.weeklyIncome) || 0; // tolerate missing/NaN on old snapshots
+  if (weeklyIncome > 0) {
     for (let i = INCOME_COLLECTION_LAG_WEEKS; i < 13; i++) {
-      ongoingIncomeByWeek[i] = a.weeklyIncome;
+      ongoingIncomeByWeek[i] = weeklyIncome;
     }
   }
 
