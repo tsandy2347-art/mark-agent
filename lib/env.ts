@@ -131,6 +131,14 @@ const schema = z.object({
   // ── Cron auth ────────────────────────────────────────────────────
   CRON_SECRET: z.string().optional().default(""),
 
+  // ── Voice (Vapi) auth ────────────────────────────────────────────
+  /** Shared secret between Vapi and Mark's /api/voice/chat/completions
+   *  endpoint. Vapi presents it as `Authorization: Bearer <key>` on the
+   *  Custom-LLM call. Same role as Adam's LLM_API_KEY. When empty the voice
+   *  endpoint is disabled (returns 503) so a misconfigured deploy can't leak
+   *  an open finance brain. */
+  VOICE_API_KEY: z.string().optional().default(""),
+
   // ── Honcho memory layer (self-host, shared with Adam) ───────────
   /** Honcho base URL — same instance every JBC agent points at. */
   HONCHO_BASE_URL: z.string().optional().default(""),

@@ -18,6 +18,7 @@ import { NextResponse, type NextRequest } from "next/server";
 const BYPASS_PREFIXES = [
   "/api/healthz",
   "/api/cron/",
+  "/api/voice/", // Vapi Custom-LLM — self-authed via Bearer VOICE_API_KEY
   "/_next/",
   "/favicon",
 ];

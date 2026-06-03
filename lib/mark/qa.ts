@@ -40,6 +40,11 @@ interface AskInput {
    *  Honcho, and writes the new user/assistant turns back. Omit to skip
    *  memory entirely (useful for ad-hoc API calls). */
   sessionId?: string;
+  /** When true, Mark's reply is shaped for text-to-speech (Vapi voice call):
+   *  spoken style, no markdown/URLs, pronounceable numbers, no data-as-of
+   *  footer. Set by the /api/voice endpoint; defaults to false for the
+   *  browser chat. */
+  voiceMode?: boolean;
 }
 
 export interface AskOutput {
@@ -158,6 +163,7 @@ export async function askMark(input: AskInput): Promise<AskOutput> {
     attachments: input.attachments,
     history: input.history,
     memoryAddendum: formatMemoryAddendum(memory),
+    voiceMode: input.voiceMode,
     // Identity that flows to recon as x-triggered-by when Mark calls the
     // create_draft_manual_journal tool. Always populated — "user:nicole" etc.
     draftJournalTriggeredBy: `user:${userPeer}`,

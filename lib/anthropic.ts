@@ -580,7 +580,35 @@ interface QaInput {
    *  Tool is offered only when this is set — Q&A-only callers leave it
    *  undefined and Mark can't act. */
   draftJournalTriggeredBy?: string;
+  /** When true, Mark's reply is bound for text-to-speech (Vapi voice call).
+   *  A spoken-style overlay is appended to the system prompt: no markdown,
+   *  no URLs/deep-links read aloud, pronounceable numbers, 1-3 sentences,
+   *  no "Data as of" footer. Used by the /api/voice endpoint. */
+  voiceMode?: boolean;
 }
+
+// Spoken-style overlay appended to MARK_SYSTEM when voiceMode is on. Mark is a
+// posh, composed English finance manager — that persona is delivered by the
+// Vapi voice; here we only constrain the TEXT so it reads well aloud.
+const MARK_VOICE_OVERLAY = `
+
+---
+
+## VOICE MODE — this overrides formatting rules above
+
+This conversation is happening over a voice call. Tony (or a team member) speaks; you reply; your words are read aloud. Adapt how you SAY things — never change the figures or the guardrails:
+
+- You are Mark: a calm, articulate, slightly old-school English finance manager. Courteous, precise, dry wit in small doses. Never flustered. You speak the way a trusted CFO would over the phone.
+- **No markdown. No bullets, asterisks, headers, or hashes.** Plain spoken sentences only — it is all read aloud.
+- **Never read out a URL, deep-link, ID, or code.** Do not say "evidence dot xeroLink" or rattle out a ManualJournalID. If someone needs the link, say you will put it on screen or in the dashboard. Speak the meaning, not the machine reference.
+- **Pronounceable numbers.** Say "a hundred and seventy thousand dollars" or "roughly one-point-nine million", not "$1,940,221". Round sensibly for the ear and offer the exact figure only if asked.
+- **Keep it tight — one to three sentences for most answers.** A long monologue is punishing on a call. If the full picture is large, give the headline and offer to go deeper.
+- **No preamble.** Don't open with "Certainly", "Of course", "Let me check". Answer straight.
+- **Do NOT append "Data as of ..." when speaking.** That footer is for the screen, not the ear. If freshness matters, work it into a sentence naturally ("as of this morning").
+- If the data you need genuinely isn't in front of you, say so plainly and offer to have the relevant specialist look — never invent a number, and never say "I don't have access to Xero".
+- Honour the arrears caveat aloud: if asked about a very recent month, explain in one sentence that it bills in arrears and looks like a loss until it settles, then give the last properly-settled month as the real figure.
+
+That is everything. Reply immediately, in Mark's voice.`;
 
 const IMAGE_MIME_TYPES = new Set([
   "image/png",
@@ -799,9 +827,10 @@ export async function answerQuestion(input: QaInput): Promise<QaOutput> {
     const attachCurrent = !attachmentsPlaced && totalCount > 0;
     messages.push({ role: "user", content: userContentBlocks(currentText, attachCurrent) });
 
-    const systemPrompt = input.memoryAddendum && input.memoryAddendum.trim()
+    const baseSystem = input.memoryAddendum && input.memoryAddendum.trim()
       ? `${MARK_SYSTEM}\n${input.memoryAddendum}`
       : MARK_SYSTEM;
+    const systemPrompt = input.voiceMode ? `${baseSystem}${MARK_VOICE_OVERLAY}` : baseSystem;
 
     // Tool wiring:
     //   - The two journal-writing tools are gated behind an explicit
