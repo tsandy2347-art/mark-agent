@@ -1,29 +1,95 @@
-// 13-week rolling cash forecast — pure compute, no I/O.
+// 13-week rolling cash forecast — pure compute, no I/O.  REWORKED 2026-06.
 //
-// Honest model:
-//  - Bank balance is the ANCHOR (Tony types it in). Xero BankSummary shows the
-//    reconciled balance, not live cash, so it's wrong for forecasting.
+// What changed from v1: the inputs are now mostly AUTO-PULLED from Xero (bank
+// balances, money owed split into the 7 JBC debtor types, bills owed), held
+// per ENTITY (SC + CQ). We compute a forecast for SC, for CQ, and a COMBINED
+// total. v1's typed-in single-entity form + invented "hospitals" bucket are gone.
+//
+// Honest model (unchanged where it was right):
+//  - Spendable cash = the bank accounts Tony has ticked as cash (credit cards
+//    and trust/property accounts excluded by default; he can override).
 //  - Money owed (AR) is timed by debtor TYPE, not Xero due dates (those are
 //    ~useless for NDIS/SaH). Each pool lands `cadenceDays` from today.
 //  - Outflows: weekly payroll + super (quarterly bursts) + PAYG (SC weekly,
 //    CQ monthly) + AP (open settled over 2 wks + weekly run) + ATO plan.
-//  - Output: per-week opening, inflows, outflows, net, closing; anything that
-//    closes below `minimumBalanceAlert` is flagged.
+//  - Output per entity: 13 weeks of opening / inflows / outflows / net /
+//    closing; anything closing below `minimumBalanceAlert` is flagged.
 
-import type { Prisma } from "./generated/prisma";
+// ── The 7 live JBC debtor types (Tony-confirmed 2026-06) + "other" catch-all.
+export const DEBTOR_TYPES = [
+  "ndia",
+  "sil",
+  "sah",
+  "brokerage",
+  "private",
+  "planManagement",
+  "dva",
+  "other",
+] as const;
+export type DebtorType = (typeof DEBTOR_TYPES)[number];
 
-// AR collection cadence by debtor type — days until $1 outstanding lands in
-// the bank. Bucketed, NOT exact dates.
-const AR_CADENCE_DAYS = {
+export const DEBTOR_LABELS: Record<DebtorType, string> = {
+  ndia: "NDIA",
+  sil: "SIL",
+  sah: "SAH",
+  brokerage: "Brokerage",
+  private: "Private",
+  planManagement: "Plan Management",
+  dva: "DVA",
+  other: "Other",
+};
+
+// Default days-until-cash by debtor type. Adjustable in the UI; persisted.
+export const DEFAULT_CADENCE_DAYS: Record<DebtorType, number> = {
   ndia: 10,
-  planManager: 30,
-  selfManaged: 14,
-  hospitals: 30,
+  sil: 14,
+  sah: 21,
+  dva: 21,
   private: 21,
-} as const;
+  planManagement: 30,
+  brokerage: 30,
+  other: 21,
+};
+
+export type TenantCode = "SC" | "CQ";
+
+// One bank/cash account as pulled from Xero, plus Tony's include/exclude choice.
+export type BankAccountState = {
+  name: string;
+  balance: number;
+  kind: "cash" | "card" | "restricted";
+  include: boolean;
+};
+
+// Forward-looking outflow assumptions — human-entered, persisted, per entity.
+export type EntityAssumptions = {
+  weeklyPayrollGross: number;
+  weeklyEmployerSuper: number;
+  weeklyPaygSc: number; // SC: weekly PAYG (Large Withholder). CQ: leave 0.
+  monthlyPaygCq: number; // CQ: monthly PAYG due 21st. SC: leave 0.
+  apWeeklyRun: number; // ongoing weekly bills beyond the open AP balance
+  atoMonthlyPaymentPlan: number; // ATO arrears instalment (CQ ~$956)
+};
+
+// Everything we hold for ONE entity in a saved snapshot.
+export type EntityState = {
+  bankAccounts: BankAccountState[];
+  ar: Record<DebtorType, number>; // money owed, by type (from Xero)
+  apOpenBalance: number; // total bills owed now (from Xero)
+  assumptions: EntityAssumptions;
+};
+
+// The whole saved snapshot.
+export type CashForecastState = {
+  asOfDate: string; // yyyy-mm-dd
+  minimumBalanceAlert: number;
+  cadenceDays: Record<DebtorType, number>;
+  entities: Record<TenantCode, EntityState>;
+  notes: string;
+  pulledAt: string | null; // when Xero data was last pulled in
+};
 
 // Quarterly super safe-lodgement dates (28th of month after quarter end).
-// Covers the forecast horizon; update annually.
 const SUPER_QUARTERLY_DUE_DATES_ISO = [
   "2026-04-28",
   "2026-07-28",
@@ -32,7 +98,6 @@ const SUPER_QUARTERLY_DUE_DATES_ISO = [
   "2027-04-28",
 ];
 
-// CQ monthly PAYG due on the 21st of the following month (ATO standard).
 function cqPaygDueDateForMonth(year: number, monthIndex: number): Date {
   let dueYear = year;
   let dueMonth = monthIndex + 1;
@@ -48,12 +113,7 @@ export type ForecastWeek = {
   weekStarting: string;
   weekEnding: string;
   openingBalance: number;
-  arNdia: number;
-  arPlanManager: number;
-  arSelfManaged: number;
-  arHospitals: number;
-  arPrivate: number;
-  sahReceipts: number;
+  arByType: Record<DebtorType, number>;
   totalInflows: number;
   payrollGross: number;
   paygScWeekly: number;
@@ -68,10 +128,9 @@ export type ForecastWeek = {
   notes: string[];
 };
 
-export type ForecastResult = {
-  asOfDate: string;
+export type EntityForecast = {
+  tenant: TenantCode | "COMBINED";
   startingCash: number;
-  minimumBalanceAlert: number;
   weeks: ForecastWeek[];
   summary: {
     lowestWeek: ForecastWeek | null;
@@ -83,8 +142,16 @@ export type ForecastResult = {
   };
 };
 
+export type ForecastResult = {
+  asOfDate: string;
+  minimumBalanceAlert: number;
+  sc: EntityForecast;
+  cq: EntityForecast;
+  combined: EntityForecast;
+};
+
 function startOfWeekMonday(d: Date): Date {
-  const day = d.getDay(); // 0 Sun .. 6 Sat
+  const day = d.getDay();
   const diff = day === 0 ? -6 : 1 - day;
   const m = new Date(d);
   m.setDate(d.getDate() + diff);
@@ -96,29 +163,28 @@ function isoDate(d: Date): string {
   return d.toISOString().slice(0, 10);
 }
 
-function num(v: Prisma.Decimal | number): number {
-  return typeof v === "number" ? v : Number(v.toString());
-}
-
 const round2 = (n: number) => Math.round(n * 100) / 100;
 
-/**
- * Allocate an AR pool to the forecast week its cadence lands in. The whole
- * `outstanding` amount lands `cadenceDays` from today. Beyond week 13 = dropped
- * (acceptable v1 — enough to surface near-term crunches).
- */
-function allocateArToWeeks(
+function emptyArByType(): Record<DebtorType, number> {
+  const o = {} as Record<DebtorType, number>;
+  for (const t of DEBTOR_TYPES) o[t] = 0;
+  return o;
+}
+
+// Allocate an AR pool to the single forecast week its cadence lands in. The
+// whole `outstanding` lands `cadenceDays` from today. Beyond week 13 = dropped.
+function allocateArToWeek(
   outstanding: number,
   cadenceDays: number,
-  weekStartDates: Date[],
+  weekStarts: Date[],
   today: Date,
 ): number[] {
-  const out = new Array(weekStartDates.length).fill(0);
+  const out = new Array(weekStarts.length).fill(0);
   if (outstanding <= 0) return out;
   const landing = new Date(today);
   landing.setDate(today.getDate() + cadenceDays);
-  for (let i = 0; i < weekStartDates.length; i++) {
-    const wkStart = weekStartDates[i];
+  for (let i = 0; i < weekStarts.length; i++) {
+    const wkStart = weekStarts[i];
     const wkEnd = new Date(wkStart);
     wkEnd.setDate(wkStart.getDate() + 6);
     if (landing >= wkStart && landing <= wkEnd) {
@@ -126,69 +192,35 @@ function allocateArToWeeks(
       return out;
     }
   }
-  return out; // beyond horizon — dropped
+  return out;
 }
 
-export type BuildForecastInput = {
-  asOfDate: Date;
-  westpacBalance: number;
-  stGeorgeBalance: number;
-  otherCashBalance: number;
-  ndiaOutstanding: number;
-  planManagerOutstanding: number;
-  selfManagedOutstanding: number;
-  hospitalsOutstanding: number;
-  privateOutstanding: number;
-  sahReceiptsMonthly: number;
-  apOpenBalance: number;
-  apWeeklyRun: number;
-  atoArrearsBalance: number;
-  atoMonthlyPaymentPlan: number;
-  weeklyPayrollGross: number;
-  weeklyEmployerSuper: number;
-  weeklyPaygSc: number;
-  monthlyPaygCq: number;
-  minimumBalanceAlert: number;
-};
+function spendableCash(entity: EntityState): number {
+  return entity.bankAccounts
+    .filter((a) => a.include)
+    .reduce((s, a) => s + a.balance, 0);
+}
 
-export function buildForecast(input: BuildForecastInput): ForecastResult {
-  const startingCash =
-    input.westpacBalance + input.stGeorgeBalance + input.otherCashBalance;
+// Build a 13-week forecast for ONE entity.
+function buildEntityForecast(
+  tenant: TenantCode,
+  entity: EntityState,
+  cadenceDays: Record<DebtorType, number>,
+  minimumBalanceAlert: number,
+  today: Date,
+  weekStarts: Date[],
+): EntityForecast {
+  const startingCash = spendableCash(entity);
 
-  const today = new Date(input.asOfDate);
-  today.setHours(0, 0, 0, 0);
-  const firstMonday = startOfWeekMonday(today);
-  const weekStarts: Date[] = [];
-  for (let i = 0; i < 13; i++) {
-    const d = new Date(firstMonday);
-    d.setDate(firstMonday.getDate() + i * 7);
-    weekStarts.push(d);
+  // AR landings per type.
+  const arWeeks: Record<DebtorType, number[]> = {} as Record<DebtorType, number[]>;
+  for (const t of DEBTOR_TYPES) {
+    arWeeks[t] = allocateArToWeek(entity.ar[t] || 0, cadenceDays[t], weekStarts, today);
   }
 
-  const arNdiaByWeek = allocateArToWeeks(input.ndiaOutstanding, AR_CADENCE_DAYS.ndia, weekStarts, today);
-  const arPmByWeek = allocateArToWeeks(input.planManagerOutstanding, AR_CADENCE_DAYS.planManager, weekStarts, today);
-  const arSmByWeek = allocateArToWeeks(input.selfManagedOutstanding, AR_CADENCE_DAYS.selfManaged, weekStarts, today);
-  const arHospByWeek = allocateArToWeeks(input.hospitalsOutstanding, AR_CADENCE_DAYS.hospitals, weekStarts, today);
-  const arPrivByWeek = allocateArToWeeks(input.privateOutstanding, AR_CADENCE_DAYS.private, weekStarts, today);
+  const a = entity.assumptions;
 
-  // SaH monthly receipts land on the week containing a 1st-of-month.
-  const sahByWeek = new Array(13).fill(0);
-  for (let i = 0; i < 13; i++) {
-    const wkStart = weekStarts[i];
-    const wkEnd = new Date(wkStart);
-    wkEnd.setDate(wkStart.getDate() + 6);
-    const checkMonths = [
-      new Date(wkStart.getFullYear(), wkStart.getMonth(), 1),
-      new Date(wkStart.getFullYear(), wkStart.getMonth() + 1, 1),
-    ];
-    for (const firstOfMonth of checkMonths) {
-      if (firstOfMonth >= wkStart && firstOfMonth <= wkEnd) {
-        sahByWeek[i] += input.sahReceiptsMonthly;
-      }
-    }
-  }
-
-  // Quarterly super lands on the week containing its due date (~one quarter of accrual).
+  // Quarterly super lands on its due-date week (~one quarter of weekly accrual).
   const superByWeek = new Array(13).fill(0);
   for (const dueIso of SUPER_QUARTERLY_DUE_DATES_ISO) {
     const due = new Date(dueIso + "T00:00:00");
@@ -196,47 +228,43 @@ export function buildForecast(input: BuildForecastInput): ForecastResult {
       const wkStart = weekStarts[i];
       const wkEnd = new Date(wkStart);
       wkEnd.setDate(wkStart.getDate() + 6);
-      if (due >= wkStart && due <= wkEnd) {
-        superByWeek[i] += input.weeklyEmployerSuper * 13;
-      }
+      if (due >= wkStart && due <= wkEnd) superByWeek[i] += a.weeklyEmployerSuper * 13;
     }
   }
 
   // CQ monthly PAYG lands on the week containing the 21st of each month.
   const cqPaygByWeek = new Array(13).fill(0);
-  for (let monthOffset = 0; monthOffset < 4; monthOffset++) {
-    const ref = new Date(today.getFullYear(), today.getMonth() - 1 + monthOffset, 1);
-    const dueDate = cqPaygDueDateForMonth(ref.getFullYear(), ref.getMonth());
-    for (let i = 0; i < 13; i++) {
-      const wkStart = weekStarts[i];
-      const wkEnd = new Date(wkStart);
-      wkEnd.setDate(wkStart.getDate() + 6);
-      if (dueDate >= wkStart && dueDate <= wkEnd) {
-        cqPaygByWeek[i] += input.monthlyPaygCq;
+  if (a.monthlyPaygCq > 0) {
+    for (let monthOffset = 0; monthOffset < 4; monthOffset++) {
+      const ref = new Date(today.getFullYear(), today.getMonth() - 1 + monthOffset, 1);
+      const dueDate = cqPaygDueDateForMonth(ref.getFullYear(), ref.getMonth());
+      for (let i = 0; i < 13; i++) {
+        const wkStart = weekStarts[i];
+        const wkEnd = new Date(wkStart);
+        wkEnd.setDate(wkStart.getDate() + 6);
+        if (dueDate >= wkStart && dueDate <= wkEnd) cqPaygByWeek[i] += a.monthlyPaygCq;
       }
     }
   }
 
   // AP — open balance settled over first 2 weeks, then weekly run.
   const apByWeek = new Array(13).fill(0);
-  if (input.apOpenBalance > 0) {
-    apByWeek[0] = input.apOpenBalance * 0.6;
-    apByWeek[1] = input.apOpenBalance * 0.4;
+  if (entity.apOpenBalance > 0) {
+    apByWeek[0] = entity.apOpenBalance * 0.6;
+    apByWeek[1] = entity.apOpenBalance * 0.4;
   }
-  for (let i = 0; i < 13; i++) apByWeek[i] += input.apWeeklyRun;
+  for (let i = 0; i < 13; i++) apByWeek[i] += a.apWeeklyRun;
 
   // ATO payment plan — monthly on the 21st.
   const atoByWeek = new Array(13).fill(0);
-  if (input.atoMonthlyPaymentPlan > 0) {
+  if (a.atoMonthlyPaymentPlan > 0) {
     for (let monthOffset = 0; monthOffset < 4; monthOffset++) {
       const ref = new Date(today.getFullYear(), today.getMonth() + monthOffset, 21);
       for (let i = 0; i < 13; i++) {
         const wkStart = weekStarts[i];
         const wkEnd = new Date(wkStart);
         wkEnd.setDate(wkStart.getDate() + 6);
-        if (ref >= wkStart && ref <= wkEnd) {
-          atoByWeek[i] += input.atoMonthlyPaymentPlan;
-        }
+        if (ref >= wkStart && ref <= wkEnd) atoByWeek[i] += a.atoMonthlyPaymentPlan;
       }
     }
   }
@@ -248,16 +276,15 @@ export function buildForecast(input: BuildForecastInput): ForecastResult {
     const wkEnd = new Date(wkStart);
     wkEnd.setDate(wkStart.getDate() + 6);
 
-    const arNdia = arNdiaByWeek[i];
-    const arPm = arPmByWeek[i];
-    const arSm = arSmByWeek[i];
-    const arHosp = arHospByWeek[i];
-    const arPriv = arPrivByWeek[i];
-    const sah = sahByWeek[i];
-    const totalIn = arNdia + arPm + arSm + arHosp + arPriv + sah;
+    const arByType = emptyArByType();
+    let totalIn = 0;
+    for (const t of DEBTOR_TYPES) {
+      arByType[t] = arWeeks[t][i];
+      totalIn += arWeeks[t][i];
+    }
 
-    const payroll = input.weeklyPayrollGross;
-    const paygSc = input.weeklyPaygSc;
+    const payroll = a.weeklyPayrollGross;
+    const paygSc = a.weeklyPaygSc;
     const paygCq = cqPaygByWeek[i];
     const superQ = superByWeek[i];
     const ap = apByWeek[i];
@@ -273,20 +300,17 @@ export function buildForecast(input: BuildForecastInput): ForecastResult {
     const notes: string[] = [];
     if (paygCq > 0) notes.push(`CQ PAYG due ($${fmt(paygCq)})`);
     if (superQ > 0) notes.push(`Quarterly super due ($${fmt(superQ)})`);
-    if (sah > 0) notes.push(`SaH monthly receipt ($${fmt(sah)})`);
     if (ato > 0) notes.push(`ATO payment plan ($${fmt(ato)})`);
+
+    const arRounded = emptyArByType();
+    for (const t of DEBTOR_TYPES) arRounded[t] = round2(arByType[t]);
 
     weeks.push({
       weekNumber: i + 1,
       weekStarting: isoDate(wkStart),
       weekEnding: isoDate(wkEnd),
       openingBalance: round2(openingBalance),
-      arNdia: round2(arNdia),
-      arPlanManager: round2(arPm),
-      arSelfManaged: round2(arSm),
-      arHospitals: round2(arHosp),
-      arPrivate: round2(arPriv),
-      sahReceipts: round2(sah),
+      arByType: arRounded,
       totalInflows: round2(totalIn),
       payrollGross: round2(payroll),
       paygScWeekly: round2(paygSc),
@@ -297,11 +321,20 @@ export function buildForecast(input: BuildForecastInput): ForecastResult {
       totalOutflows: round2(totalOut),
       netFlow: round2(netFlow),
       closingBalance: round2(closingBalance),
-      belowMinimum: closingBalance < input.minimumBalanceAlert,
+      belowMinimum: closingBalance < minimumBalanceAlert,
       notes,
     });
   }
 
+  return summarise(tenant, startingCash, weeks, minimumBalanceAlert);
+}
+
+function summarise(
+  tenant: TenantCode | "COMBINED",
+  startingCash: number,
+  weeks: ForecastWeek[],
+  minimumBalanceAlert: number,
+): EntityForecast {
   let lowestWeek: ForecastWeek | null = null;
   let lowestBalance = Number.MAX_SAFE_INTEGER;
   let weeksBelowMinimum = 0;
@@ -316,11 +349,9 @@ export function buildForecast(input: BuildForecastInput): ForecastResult {
     totalIn += w.totalInflows;
     totalOut += w.totalOutflows;
   }
-
   return {
-    asOfDate: isoDate(input.asOfDate),
+    tenant,
     startingCash: round2(startingCash),
-    minimumBalanceAlert: input.minimumBalanceAlert,
     weeks,
     summary: {
       lowestWeek,
@@ -333,47 +364,85 @@ export function buildForecast(input: BuildForecastInput): ForecastResult {
   };
 }
 
-/** Decimal-row → buildForecast args. */
-export function inputRowToBuildArgs(row: {
-  asOfDate: Date;
-  westpacBalance: Prisma.Decimal;
-  stGeorgeBalance: Prisma.Decimal;
-  otherCashBalance: Prisma.Decimal;
-  ndiaOutstanding: Prisma.Decimal;
-  planManagerOutstanding: Prisma.Decimal;
-  selfManagedOutstanding: Prisma.Decimal;
-  hospitalsOutstanding: Prisma.Decimal;
-  privateOutstanding: Prisma.Decimal;
-  sahReceiptsMonthly: Prisma.Decimal;
-  apOpenBalance: Prisma.Decimal;
-  apWeeklyRun: Prisma.Decimal;
-  atoArrearsBalance: Prisma.Decimal;
-  atoMonthlyPaymentPlan: Prisma.Decimal;
-  weeklyPayrollGross: Prisma.Decimal;
-  weeklyEmployerSuper: Prisma.Decimal;
-  weeklyPaygSc: Prisma.Decimal;
-  monthlyPaygCq: Prisma.Decimal;
-  minimumBalanceAlert: Prisma.Decimal;
-}): BuildForecastInput {
+// Sum two entity forecasts week-by-week into a combined view.
+function combineForecasts(
+  sc: EntityForecast,
+  cq: EntityForecast,
+  minimumBalanceAlert: number,
+): EntityForecast {
+  const startingCash = sc.startingCash + cq.startingCash;
+  const weeks: ForecastWeek[] = [];
+  for (let i = 0; i < 13; i++) {
+    const a = sc.weeks[i];
+    const b = cq.weeks[i];
+    const arByType = emptyArByType();
+    for (const t of DEBTOR_TYPES) arByType[t] = round2((a.arByType[t] || 0) + (b.arByType[t] || 0));
+    const opening = round2(a.openingBalance + b.openingBalance);
+    const closing = round2(a.closingBalance + b.closingBalance);
+    weeks.push({
+      weekNumber: i + 1,
+      weekStarting: a.weekStarting,
+      weekEnding: a.weekEnding,
+      openingBalance: opening,
+      arByType,
+      totalInflows: round2(a.totalInflows + b.totalInflows),
+      payrollGross: round2(a.payrollGross + b.payrollGross),
+      paygScWeekly: round2(a.paygScWeekly + b.paygScWeekly),
+      paygCqMonthly: round2(a.paygCqMonthly + b.paygCqMonthly),
+      employerSuperQuarterly: round2(a.employerSuperQuarterly + b.employerSuperQuarterly),
+      apOutflow: round2(a.apOutflow + b.apOutflow),
+      atoPaymentPlan: round2(a.atoPaymentPlan + b.atoPaymentPlan),
+      totalOutflows: round2(a.totalOutflows + b.totalOutflows),
+      netFlow: round2(a.netFlow + b.netFlow),
+      closingBalance: closing,
+      belowMinimum: closing < minimumBalanceAlert,
+      notes: [],
+    });
+  }
+  return summarise("COMBINED", startingCash, weeks, minimumBalanceAlert);
+}
+
+export function buildForecast(state: CashForecastState): ForecastResult {
+  const today = new Date(state.asOfDate + "T00:00:00");
+  today.setHours(0, 0, 0, 0);
+  const firstMonday = startOfWeekMonday(today);
+  const weekStarts: Date[] = [];
+  for (let i = 0; i < 13; i++) {
+    const d = new Date(firstMonday);
+    d.setDate(firstMonday.getDate() + i * 7);
+    weekStarts.push(d);
+  }
+  const min = state.minimumBalanceAlert;
+  const sc = buildEntityForecast("SC", state.entities.SC, state.cadenceDays, min, today, weekStarts);
+  const cq = buildEntityForecast("CQ", state.entities.CQ, state.cadenceDays, min, today, weekStarts);
+  const combined = combineForecasts(sc, cq, min);
+  return { asOfDate: state.asOfDate, minimumBalanceAlert: min, sc, cq, combined };
+}
+
+// A blank entity (used before the first Xero pull).
+export function emptyEntityState(): EntityState {
   return {
-    asOfDate: row.asOfDate,
-    westpacBalance: num(row.westpacBalance),
-    stGeorgeBalance: num(row.stGeorgeBalance),
-    otherCashBalance: num(row.otherCashBalance),
-    ndiaOutstanding: num(row.ndiaOutstanding),
-    planManagerOutstanding: num(row.planManagerOutstanding),
-    selfManagedOutstanding: num(row.selfManagedOutstanding),
-    hospitalsOutstanding: num(row.hospitalsOutstanding),
-    privateOutstanding: num(row.privateOutstanding),
-    sahReceiptsMonthly: num(row.sahReceiptsMonthly),
-    apOpenBalance: num(row.apOpenBalance),
-    apWeeklyRun: num(row.apWeeklyRun),
-    atoArrearsBalance: num(row.atoArrearsBalance),
-    atoMonthlyPaymentPlan: num(row.atoMonthlyPaymentPlan),
-    weeklyPayrollGross: num(row.weeklyPayrollGross),
-    weeklyEmployerSuper: num(row.weeklyEmployerSuper),
-    weeklyPaygSc: num(row.weeklyPaygSc),
-    monthlyPaygCq: num(row.monthlyPaygCq),
-    minimumBalanceAlert: num(row.minimumBalanceAlert),
+    bankAccounts: [],
+    ar: emptyArByType(),
+    apOpenBalance: 0,
+    assumptions: {
+      weeklyPayrollGross: 0,
+      weeklyEmployerSuper: 0,
+      weeklyPaygSc: 0,
+      monthlyPaygCq: 0,
+      apWeeklyRun: 0,
+      atoMonthlyPaymentPlan: 0,
+    },
+  };
+}
+
+export function emptyState(asOfDate: string): CashForecastState {
+  return {
+    asOfDate,
+    minimumBalanceAlert: 500000,
+    cadenceDays: { ...DEFAULT_CADENCE_DAYS },
+    entities: { SC: emptyEntityState(), CQ: emptyEntityState() },
+    notes: "",
+    pulledAt: null,
   };
 }

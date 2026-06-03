@@ -203,50 +203,29 @@ model AlertDelivery {
 }
 
 /**
- * 13-week rolling cash forecast input — one row per "as-of" snapshot Tony saves.
+ * 13-week cash forecast — REWORKED 2026-06 (Tony's v1 verdict: too much manual
+ * entry, "get the information from Xero"). This model is now an append-only
+ * JSON SNAPSHOT of one forecast save, holding BOTH entities (SC + CQ).
  *
- * Mark's only manager-level cash view. It is TYPED-IN, not auto-pulled:
- *  - Bank balances are typed by Tony (Xero BankSummary shows reconciled, not
- *    live cash — it lies for forecasting).
- *  - Money owed (AR) is entered by debtor TYPE, because Xero due dates are
- *    useless for NDIS/SaH (DueDate = invoice creation, not payment cycle).
- *    Each type collects on its own cadence (NDIA ~10d, plan mgr ~30d,
- *    self-managed ~14d, hospitals ~30d, private ~21d).
- *  - Outflows: weekly payroll + super (quarterly bursts) + PAYG (SC weekly,
- *    CQ monthly) + AP (open + weekly run) + ATO payment plan.
+ * The bulk of each save is AUTO-PULLED from Xero (via the payroll-poster box's
+ * read-only /cash-inputs endpoint — Mark holds no Xero keys):
+ *   - bank accounts + which count as spendable cash
+ *   - money owed (AR) split into the 7 JBC debtor types by income account
+ *   - bills owed (AP)
+ * Only a few forward-looking outflow assumptions are human-entered (weekly
+ * payroll, super, PAYG, ATO plan) and the collection cadences — all persisted
+ * in the snapshot so Tony confirms rather than re-types each week.
  *
- * The forecast itself is computed on the fly from the latest row (see
- * lib/cash-forecast.ts) — only the inputs are stored. Append-only: each save
- * is a new row, newest asOfDate wins.
+ * The forecast (per-entity + combined) is computed on the fly from `state`
+ * (see lib/cash-forecast.ts). Newest asOfDate wins.
  */
-model CashForecastInput {
-  id                     String   @id @default(cuid())
-  asOfDate               DateTime @db.Date
-  // Bank (typed-in, live)
-  westpacBalance         Decimal  @db.Decimal(14, 2)
-  stGeorgeBalance        Decimal  @db.Decimal(14, 2)
-  otherCashBalance       Decimal  @default(0) @db.Decimal(14, 2)
-  // Money owed, by debtor type
-  ndiaOutstanding        Decimal  @default(0) @db.Decimal(14, 2)
-  planManagerOutstanding Decimal  @default(0) @db.Decimal(14, 2)
-  selfManagedOutstanding Decimal  @default(0) @db.Decimal(14, 2)
-  hospitalsOutstanding   Decimal  @default(0) @db.Decimal(14, 2)
-  privateOutstanding     Decimal  @default(0) @db.Decimal(14, 2)
-  sahReceiptsMonthly     Decimal  @default(0) @db.Decimal(14, 2)
-  // Outflows
-  apOpenBalance          Decimal  @default(0) @db.Decimal(14, 2)
-  apWeeklyRun            Decimal  @default(0) @db.Decimal(14, 2)
-  atoArrearsBalance      Decimal  @default(0) @db.Decimal(14, 2)
-  atoMonthlyPaymentPlan  Decimal  @default(0) @db.Decimal(14, 2)
-  weeklyPayrollGross     Decimal  @db.Decimal(14, 2)
-  weeklyEmployerSuper    Decimal  @db.Decimal(14, 2)
-  weeklyPaygSc           Decimal  @db.Decimal(14, 2)
-  monthlyPaygCq          Decimal  @db.Decimal(14, 2)
-  // Alerts
-  minimumBalanceAlert    Decimal  @default(500000) @db.Decimal(14, 2)
-  notes                  String   @default("")
-  savedBy                String   @default("") // basic-auth username, audit
-  createdAt              DateTime @default(now())
+model CashForecastSnapshot {
+  id        String   @id @default(cuid())
+  asOfDate  DateTime @db.Date
+  state     Json // full CashForecastState (both entities + assumptions + cadences)
+  notes     String   @default("")
+  savedBy   String   @default("") // basic-auth username, audit
+  createdAt DateTime @default(now())
 
   @@index([asOfDate(sort: Desc)])
 }
