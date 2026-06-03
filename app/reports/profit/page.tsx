@@ -83,6 +83,16 @@ export default async function ProfitReportPage() {
   const W = 720;
   const H = 300;
 
+  // Scale the axis to the REAL (non-faded) months only, so the arrears crash
+  // doesn't squash the months that actually matter. Faded bars beyond the
+  // range get clamped to the frame and flagged.
+  const realVals = months
+    .map((m, i) => (faded.includes(i) ? [] : [scMap.get(m)?.netProfit, cqMap.get(m)?.netProfit]))
+    .flat()
+    .filter((v): v is number => v != null);
+  const realMax = realVals.length ? Math.max(0, ...realVals) : undefined;
+  const realMin = realVals.length ? Math.min(0, ...realVals) : undefined;
+
   const bars = groupedBars({
     categories: cats,
     series: [
@@ -92,6 +102,8 @@ export default async function ProfitReportPage() {
     width: W,
     height: H,
     fadedCategories: faded,
+    yMax: realMax,
+    yMin: realMin,
   });
 
   const consolidatedSeries = (fin.consolidated ?? []).slice().sort((a, b) => a.month.localeCompare(b.month));
@@ -201,6 +213,10 @@ function BarSvg({ chart }: { chart: ReturnType<typeof groupedBars> }) {
       {/* bars */}
       {chart.bars.map((b, i) => (
         <rect key={i} x={b.x} y={b.y} width={b.w} height={b.h} rx={2} fill={b.color} opacity={b.faded ? 0.32 : 0.92} />
+      ))}
+      {/* clipped (off-frame arrears) markers — a small chevron at the frame edge */}
+      {chart.bars.filter((b) => b.clipped).map((b, i) => (
+        <text key={`c${i}`} x={b.x + b.w / 2} y={chart.height - chart.padB + 12} textAnchor="middle" fontSize={11} fill={CHART_COLORS.muted}>▾</text>
       ))}
       {/* category labels */}
       {chart.catLabels.map((c, i) => (

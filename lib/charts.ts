@@ -54,6 +54,11 @@ export function groupedBars(opts: {
   height: number;
   /** indices of categories to render as "faded" (e.g. arrears/partial months) */
   fadedCategories?: number[];
+  /** Explicit y-axis range. When set, the axis is scaled to these and any bar
+   *  beyond is clamped to the frame (used to stop arrears outliers squashing
+   *  the real months). */
+  yMin?: number;
+  yMax?: number;
 }) {
   const { categories, series, width, height } = opts;
   const padL = 52;
@@ -64,13 +69,16 @@ export function groupedBars(opts: {
   const plotH = height - padT - padB;
 
   const all = series.flatMap((s) => s.values.filter((v): v is number => v != null));
-  const rawMax = Math.max(0, ...all);
-  const rawMin = Math.min(0, ...all);
+  const rawMax = opts.yMax ?? Math.max(0, ...all);
+  const rawMin = opts.yMin ?? Math.min(0, ...all);
   // Pad the range a touch so bars don't kiss the frame.
   const max = rawMax === 0 && rawMin === 0 ? 1 : rawMax * 1.1;
-  const min = rawMin * 1.1;
+  const min = rawMin < 0 ? rawMin * 1.1 : rawMin;
   const range = max - min || 1;
-  const yOf = (v: number) => padT + plotH * (1 - (v - min) / range);
+  // Clamp so an out-of-range (arrears) bar stops at the frame instead of
+  // exploding the geometry.
+  const clamp = (v: number) => Math.min(Math.max(v, min), max);
+  const yOf = (v: number) => padT + plotH * (1 - (clamp(v) - min) / range);
   const zeroY = yOf(0);
 
   const groupW = plotW / categories.length;
@@ -80,7 +88,7 @@ export function groupedBars(opts: {
 
   const bars: Array<{
     x: number; y: number; w: number; h: number; color: string; faded: boolean;
-    value: number; label: string; cat: string;
+    value: number; label: string; cat: string; clipped: boolean;
   }> = [];
   categories.forEach((cat, ci) => {
     const gx = padL + groupW * ci + innerPad;
@@ -99,6 +107,7 @@ export function groupedBars(opts: {
         value: v,
         label: s.label,
         cat,
+        clipped: v < min || v > max,
       });
     });
   });
