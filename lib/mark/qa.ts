@@ -79,6 +79,7 @@ export async function askMark(input: AskInput): Promise<AskOutput> {
   const findingsLimit = isVoice ? 60 : 400;
   const findingsBodyCap = isVoice ? 600 : 2500;
 
+  const __td = Date.now();
   const [findings, metrics, statuses, memory, financials, payrollMonths] = await Promise.all([
     // Pull directly from the shared hermes-jbc findings DB — the table every
     // Hermes skill writes to. We bypass Mark's local IngestedFinding mirror
@@ -108,6 +109,7 @@ export async function askMark(input: AskInput): Promise<AskOutput> {
       select: { entityCode: true, month: true, totalGross: true, totalSuper: true, totalAllowances: true, totalLeaveTaken: true },
     }),
   ]);
+  if (isVoice) console.log(`[mtiming] dataLoad=${Date.now() - __td}ms findings=${findings.length}`);
   // Findings shape passed to Claude. Previously this was aggressively
   // omitted) which meant Mark physically had nothing to drill into when
   // the user asked a follow-up like "tell me more about X". He'd just

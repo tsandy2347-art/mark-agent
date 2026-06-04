@@ -886,6 +886,8 @@ export async function answerQuestion(input: QaInput): Promise<QaOutput> {
       // copy, so cast it through unknown to this shared type.
       let resp: Anthropic.Messages.Message;
       if (canStream) {
+        const __tm = Date.now();
+        let __firstTok = 0;
         // Stream the FINAL answer text to the caller as it arrives. We buffer
         // the first chunk until a word boundary past 20 chars (or punctuation)
         // so ElevenLabs doesn't clip the opening syllable — Adam's proven guard.
@@ -906,6 +908,7 @@ export async function answerQuestion(input: QaInput): Promise<QaOutput> {
           chunkBuf = "";
         };
         stream.on("text", (delta: string) => {
+          if (!__firstTok) __firstTok = Date.now() - __tm;
           if (bufFlushed) {
             emit(delta);
             return;
@@ -920,6 +923,7 @@ export async function answerQuestion(input: QaInput): Promise<QaOutput> {
         // dual-install type identity. We only read .content / .stop_reason.
         resp = (await stream.finalMessage()) as unknown as typeof resp;
         flushBuf();
+        console.log(`[mtiming] iter${iter} sysPrompt=${systemPrompt.length}c msgs=${messages.length} firstTok=${__firstTok}ms modelTotal=${Date.now() - __tm}ms`);
       } else {
         resp =
           env.MARK_LLM_BACKEND === "hermes"
