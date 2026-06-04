@@ -79,7 +79,6 @@ export async function askMark(input: AskInput): Promise<AskOutput> {
   const findingsLimit = isVoice ? 60 : 400;
   const findingsBodyCap = isVoice ? 600 : 2500;
 
-  const __t0 = Date.now();
   const [findings, metrics, statuses, memory, financials, payrollMonths] = await Promise.all([
     // Pull directly from the shared hermes-jbc findings DB — the table every
     // Hermes skill writes to. We bypass Mark's local IngestedFinding mirror
@@ -90,7 +89,7 @@ export async function askMark(input: AskInput): Promise<AskOutput> {
     readLatestMetrics(),
     prisma.specialistRunStatus.findMany(),
     input.sessionId
-      ? fetchMarkMemory({ sessionId: input.sessionId, userPeer })
+      ? fetchMarkMemory({ sessionId: input.sessionId, userPeer, timeoutMs: isVoice ? 1500 : undefined })
       : Promise.resolve({ resume: [], memoryBlock: null, disabled: !env.HONCHO_BASE_URL, errored: false }),
     // P&L per entity. DB-first: stored closed months (zero Xero calls) plus
     // ONLY the live current month (1 call/entity, cached). Lets Mark answer
@@ -104,9 +103,6 @@ export async function askMark(input: AskInput): Promise<AskOutput> {
       select: { entityCode: true, month: true, totalGross: true, totalSuper: true, totalAllowances: true, totalLeaveTaken: true },
     }),
   ]);
-  if (isVoice) {
-    console.log(`[voice-timing] data-load ${Date.now() - __t0}ms (findings=${findings.length})`);
-  }
   // Findings shape passed to Claude. Previously this was aggressively
   // omitted) which meant Mark physically had nothing to drill into when
   // the user asked a follow-up like "tell me more about X". He'd just
@@ -213,7 +209,6 @@ export async function askMark(input: AskInput): Promise<AskOutput> {
       }
     : { note: "No payroll data uploaded yet (Payroll detail page)." };
 
-  const __tModel = Date.now();
   const { answer, toolCallsFired } = await answerQuestion({
     question: input.question,
     dataAsOf,
@@ -228,9 +223,6 @@ export async function askMark(input: AskInput): Promise<AskOutput> {
     // create_draft_manual_journal tool. Always populated — "user:nicole" etc.
     draftJournalTriggeredBy: `user:${userPeer}`,
   });
-  if (isVoice) {
-    console.log(`[voice-timing] prep->model-done ${Date.now() - __tModel}ms (answer ${answer.length} chars)`);
-  }
 
   // Audit log: if the user attached files, record the filenames in the
   // question text so FinanceQuery shows "[Attached: a.pdf, b.xlsx, c.png] ..."
@@ -249,10 +241,14 @@ export async function askMark(input: AskInput): Promise<AskOutput> {
     },
   });
 
-  // Persist the turn to Honcho (best-effort; doesn't block the response).
-  // Both messages get posted so the deriver builds an accurate transcript.
+  // Persist the turn to Honcho. For VOICE this is fire-and-forget — we do NOT
+  // await it, because the answer has already streamed to the caller and the
+  // Honcho writes (which can each hit a multi-second timeout when Honcho is
+  // slow) would otherwise hold the request open and delay the NEXT turn. For
+  // browser chat we still await so the transcript is consistent before we
+  // return. Errors are swallowed inside postTurn either way.
   if (input.sessionId) {
-    await Promise.all([
+    const writes = Promise.all([
       postTurn({
         sessionId: input.sessionId,
         peerId: userPeer,
@@ -264,6 +260,12 @@ export async function askMark(input: AskInput): Promise<AskOutput> {
         content: answer,
       }),
     ]);
+    if (isVoice) {
+      // Don't block the voice turn on memory writes.
+      void writes.catch(() => {});
+    } else {
+      await writes;
+    }
   }
 
   return {

@@ -95,12 +95,12 @@ async function withTimeout<T>(promise: Promise<T>, ms: number, label: string): P
 /** GET session/{id}/context — returns the message history for this session
  *  PLUS any summary the deriver has produced. We map peer ids to {role:
  *  "user" | "assistant"} based on which peer is Mark. */
-async function getSessionContext(sessionId: string): Promise<SessionContextResponse | null> {
+async function getSessionContext(sessionId: string, timeoutMs?: number): Promise<SessionContextResponse | null> {
   if (!isConfigured()) return null;
   const url = `${env.HONCHO_BASE_URL}/v3/workspaces/${encodeURIComponent(env.HONCHO_WORKSPACE)}/sessions/${encodeURIComponent(sessionId)}/context`;
   const resp = await withTimeout(
     fetch(url, { headers: authHeaders() }),
-    env.HONCHO_TIMEOUT_MS,
+    timeoutMs ?? env.HONCHO_TIMEOUT_MS,
     `session/${sessionId}/context`,
   );
   if (!resp || !resp.ok) {
@@ -117,12 +117,12 @@ async function getSessionContext(sessionId: string): Promise<SessionContextRespo
  *  representation of that user. Shape: a long string of `[timestamp] fact`
  *  lines, oldest-first (per Adam's experience). We sort newest-first and
  *  cap the most recent ~80 lines so the prompt stays bounded. */
-async function getPeerContext(peerId: string): Promise<PeerContextResponse | null> {
+async function getPeerContext(peerId: string, timeoutMs?: number): Promise<PeerContextResponse | null> {
   if (!isConfigured()) return null;
   const url = `${env.HONCHO_BASE_URL}/v3/workspaces/${encodeURIComponent(env.HONCHO_WORKSPACE)}/peers/${encodeURIComponent(peerId)}/context`;
   const resp = await withTimeout(
     fetch(url, { headers: authHeaders() }),
-    env.HONCHO_TIMEOUT_MS,
+    timeoutMs ?? env.HONCHO_TIMEOUT_MS,
     `peer/${peerId}/context`,
   );
   if (!resp || !resp.ok) {
@@ -182,7 +182,7 @@ function mapSessionTurns(sessionData: SessionContextResponse | null, markPeer: s
 /** One call: fetch session resume + cross-session peer facts in parallel,
  *  with the timeout guards baked in. Returns a structured snapshot the API
  *  layer can hand straight to the model. */
-export async function fetchMarkMemory(args: { sessionId: string; userPeer: string }): Promise<HonchoMemorySnapshot> {
+export async function fetchMarkMemory(args: { sessionId: string; userPeer: string; timeoutMs?: number }): Promise<HonchoMemorySnapshot> {
   const disabled = !isConfigured();
   if (disabled) {
     return { resume: [], memoryBlock: null, disabled: true, errored: false };
@@ -193,8 +193,8 @@ export async function fetchMarkMemory(args: { sessionId: string; userPeer: strin
   let peerData: PeerContextResponse | null = null;
   try {
     [sessionData, peerData] = await Promise.all([
-      getSessionContext(args.sessionId),
-      getPeerContext(args.userPeer),
+      getSessionContext(args.sessionId, args.timeoutMs),
+      getPeerContext(args.userPeer, args.timeoutMs),
     ]);
   } catch (err) {
     // eslint-disable-next-line no-console
