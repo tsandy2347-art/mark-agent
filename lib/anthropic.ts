@@ -839,7 +839,9 @@ export async function answerQuestion(input: QaInput): Promise<QaOutput> {
       `Structured data you may use to answer (only use figures present here — ` +
       `if the answer is not in here, say so):\n` +
       `${JSON.stringify(input.data)}\n\n` +
-      `Answer in plain English. End with: "Data as of ${input.dataAsOf}."`;
+      (input.voiceMode
+        ? `Answer in one short spoken sentence. DO NOT mention "Data as of", the date, or the time — this is a phone call.`
+        : `Answer in plain English. End with: "Data as of ${input.dataAsOf}."`);
 
     const attachCurrent = !attachmentsPlaced && totalCount > 0;
     messages.push({ role: "user", content: userContentBlocks(currentText, attachCurrent) });
