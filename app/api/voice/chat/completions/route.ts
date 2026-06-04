@@ -124,24 +124,23 @@ export async function POST(req: NextRequest) {
   const created = Math.floor(Date.now() / 1000);
   const wantStream = body.stream !== false;
 
-  let answer = "";
-  try {
-    const out = await askMark({
-      askedBy: "voice",
-      question: effectiveQ,
-      includeRestricted: false, // never expose restricted pay/people over voice
-      history,
-      sessionId,
-      voiceMode: true,
-    });
-    answer = out.answer || "I'm sorry, I couldn't pull that together just now.";
-  } catch (err) {
-    console.error("[voice] askMark failed:", err);
-    answer =
-      "I'm sorry, I couldn't reach the finance data just now. Do give me a moment and try again.";
-  }
-
+  // ── Non-streaming path (rare; Vapi normally wants a stream) ──────────────
   if (!wantStream) {
+    let answer = "";
+    try {
+      const out = await askMark({
+        askedBy: "voice",
+        question: effectiveQ,
+        includeRestricted: false,
+        history,
+        sessionId,
+        voiceMode: true,
+      });
+      answer = out.answer || "I'm sorry, I couldn't pull that together just now.";
+    } catch (err) {
+      console.error("[voice] askMark failed:", err);
+      answer = "I'm sorry, I couldn't reach the finance data just now. Do give me a moment and try again.";
+    }
     return new Response(
       JSON.stringify({
         id,
@@ -156,23 +155,54 @@ export async function POST(req: NextRequest) {
     );
   }
 
-  // Stream the answer back as SSE. askMark is non-streaming, so we chunk the
-  // finished text into bite-size deltas — Vapi starts speaking as they arrive.
+  // ── Streaming path ───────────────────────────────────────────────────────
+  // We open the SSE response IMMEDIATELY and let askMark stream the answer's
+  // text into it token-by-token via onText, so Vapi starts speaking ~1s in
+  // instead of waiting for Mark to compose the whole reply first. The brain's
+  // tool loop (P&L / payroll lookups) runs transparently — only the FINAL
+  // answer text streams. If anything throws, we emit a graceful spoken line.
   const encoder = new TextEncoder();
   const stream = new ReadableStream({
-    start(controller) {
+    async start(controller) {
+      // Opening role delta (OpenAI-stream convention).
       controller.enqueue(encoder.encode(sseChunk(id, created, { role: "assistant", content: "" }, null)));
-      // Chunk on word boundaries, ~80 chars per delta.
-      const words = answer.split(/(\s+)/);
-      let buf = "";
-      for (const w of words) {
-        buf += w;
-        if (buf.length >= 80) {
-          controller.enqueue(encoder.encode(sseChunk(id, created, { content: buf }, null)));
-          buf = "";
-        }
+
+      let emittedAny = false;
+      const onText = (delta: string) => {
+        if (!delta) return;
+        emittedAny = true;
+        controller.enqueue(encoder.encode(sseChunk(id, created, { content: delta }, null)));
+      };
+
+      try {
+        await askMark({
+          askedBy: "voice",
+          question: effectiveQ,
+          includeRestricted: false, // never expose restricted pay/people over voice
+          history,
+          sessionId,
+          voiceMode: true,
+          onText,
+        });
+      } catch (err) {
+        console.error("[voice] askMark stream failed:", err);
       }
-      if (buf) controller.enqueue(encoder.encode(sseChunk(id, created, { content: buf }, null)));
+
+      // Fallback: if nothing streamed (e.g. backend without token streaming, or
+      // an early error), speak a graceful line so the call never goes silent.
+      if (!emittedAny) {
+        controller.enqueue(
+          encoder.encode(
+            sseChunk(
+              id,
+              created,
+              { content: "I'm sorry, I couldn't pull that together just now. Do try me again." },
+              null,
+            ),
+          ),
+        );
+      }
+
       controller.enqueue(encoder.encode(sseChunk(id, created, {}, "stop")));
       controller.enqueue(encoder.encode("data: [DONE]\n\n"));
       controller.close();

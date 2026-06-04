@@ -593,6 +593,14 @@ interface QaInput {
    *  no URLs/deep-links read aloud, pronounceable numbers, 1-3 sentences,
    *  no "Data as of" footer. Used by the /api/voice endpoint. */
   voiceMode?: boolean;
+  /** Optional streaming sink. When provided AND the active backend is the
+   *  direct Anthropic SDK, the FINAL answer's text is streamed token-by-token
+   *  as it's generated (with a small first-token buffer so ElevenLabs doesn't
+   *  clip the opening syllable). Lets the voice endpoint start speaking ~1s in
+   *  instead of waiting for the whole answer. No-op on the hermes backend
+   *  (which isn't token-streaming) — the caller still gets the full answer via
+   *  the return value either way, so behaviour is unchanged when omitted. */
+  onText?: (delta: string) => void;
 }
 
 // Spoken-style overlay appended to MARK_SYSTEM when voiceMode is on. Mark is a
@@ -868,21 +876,67 @@ export async function answerQuestion(input: QaInput): Promise<QaOutput> {
       //                  every conversation feeds Hermes's autonomous
       //                  skill_manage loop. Shim translates OpenAI <-> Anthropic
       //                  in lib/mark/hermes-client.ts so this loop is unchanged.
-      const resp =
-        env.MARK_LLM_BACKEND === "hermes"
-          ? await callHermesAsAnthropic({
-              systemPrompt,
-              messages,
-              tools,
-              maxTokens: 2000,
-            })
-          : await c.messages.create({
-              model: env.ANTHROPIC_MODEL,
-              max_tokens: 2000,
-              system: systemPrompt,
-              messages,
-              ...(tools.length ? { tools } : {}),
-            });
+      // Streaming is only possible on the direct Anthropic SDK path AND when
+      // the caller supplied an onText sink (voice). Otherwise fall back to the
+      // existing non-streaming create() — behaviour unchanged.
+      const canStream = Boolean(input.onText) && env.MARK_LLM_BACKEND !== "hermes";
+
+      // Type against the project SDK's Message (same type the loop below reads
+      // off `resp`). The streamed finalMessage() may come from a sibling SDK
+      // copy, so cast it through unknown to this shared type.
+      let resp: Anthropic.Messages.Message;
+      if (canStream) {
+        // Stream the FINAL answer text to the caller as it arrives. We buffer
+        // the first chunk until a word boundary past 20 chars (or punctuation)
+        // so ElevenLabs doesn't clip the opening syllable — Adam's proven guard.
+        const stream = c.messages.stream({
+          model: env.ANTHROPIC_MODEL,
+          max_tokens: 2000,
+          system: systemPrompt,
+          messages,
+          ...(tools.length ? { tools } : {}),
+        });
+        let chunkBuf = "";
+        let bufFlushed = false;
+        const emit = input.onText!;
+        const flushBuf = () => {
+          if (bufFlushed || !chunkBuf) return;
+          bufFlushed = true;
+          emit(chunkBuf);
+          chunkBuf = "";
+        };
+        stream.on("text", (delta: string) => {
+          if (bufFlushed) {
+            emit(delta);
+            return;
+          }
+          chunkBuf += delta;
+          const atWordBoundary = chunkBuf.length >= 20 && /\s/.test(delta.slice(-1));
+          const atPunct = /[.,!?:;]/.test(chunkBuf.slice(-1));
+          if (atWordBoundary || atPunct) flushBuf();
+        });
+        // finalMessage() comes from whichever SDK copy the client resolved; cast
+        // through unknown so the shared `resp` type holds regardless of the
+        // dual-install type identity. We only read .content / .stop_reason.
+        resp = (await stream.finalMessage()) as unknown as typeof resp;
+        flushBuf();
+      } else {
+        resp =
+          env.MARK_LLM_BACKEND === "hermes"
+            ? await callHermesAsAnthropic({
+                systemPrompt,
+                messages,
+                tools,
+                maxTokens: 2000,
+              })
+            : await c.messages.create({
+                model: env.ANTHROPIC_MODEL,
+                max_tokens: 2000,
+                system: systemPrompt,
+                messages,
+                ...(tools.length ? { tools } : {}),
+              });
+      }
 
       // Collect any plain-text blocks (Claude often emits a short narration
       // alongside a tool_use — e.g. "Creating the draft now…").

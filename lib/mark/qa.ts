@@ -45,6 +45,10 @@ interface AskInput {
    *  footer. Set by the /api/voice endpoint; defaults to false for the
    *  browser chat. */
   voiceMode?: boolean;
+  /** Optional streaming sink — forwarded to answerQuestion. When set (voice),
+   *  the final answer streams token-by-token to this callback as it generates,
+   *  so Vapi starts speaking sooner. The full answer is still returned. */
+  onText?: (delta: string) => void;
 }
 
 export interface AskOutput {
@@ -209,6 +213,7 @@ export async function askMark(input: AskInput): Promise<AskOutput> {
     history: input.history,
     memoryAddendum: formatMemoryAddendum(memory),
     voiceMode: input.voiceMode,
+    onText: input.onText,
     // Identity that flows to recon as x-triggered-by when Mark calls the
     // create_draft_manual_journal tool. Always populated — "user:nicole" etc.
     draftJournalTriggeredBy: `user:${userPeer}`,
