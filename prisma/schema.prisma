@@ -284,3 +284,36 @@ model CsvImport {
 
   @@index([kind, uploadedAt(sort: Desc)])
 }
+
+/**
+ * MonthlyFinancials — Mark's permanent Profit & Loss history book.
+ *
+ * WHY: the live Xero P&L pull (via the poster) costs ~8 Xero API calls per peek
+ * (4 months x 2 entities) and Xero's uncertified tier caps each entity at ~1000
+ * calls/day. CLOSED months never change, so there is no reason to re-fetch them.
+ * Tony uploads the 24-month Xero P&L export (one per entity) on the /financials
+ * page; we parse each closed month into a row here ONCE. Mark then answers profit
+ * questions for closed months straight from this table (zero Xero calls), and
+ * only hits Xero live for the current, still-moving month.
+ *
+ * One row per (entityCode, month). Re-uploading the same month overwrites it
+ * (upsert) so corrections/restatements are easy. `month` is "YYYY-MM".
+ */
+model MonthlyFinancials {
+  id                      String   @id @default(cuid())
+  entityCode              String   // "SC" | "CQ"
+  month                   String   // "YYYY-MM" e.g. "2026-04"
+  totalIncome             Float?
+  totalCostOfSales        Float?
+  grossProfit             Float?
+  totalOtherIncome        Float?
+  totalOperatingExpenses  Float?
+  netProfit               Float?
+  sourceFilename          String?  // the upload it came from, for audit
+  uploadedBy              String   // basic-auth peer e.g. "user:tony"
+  uploadedAt              DateTime @default(now())
+  updatedAt              DateTime @updatedAt
+
+  @@unique([entityCode, month])
+  @@index([entityCode, month])
+}

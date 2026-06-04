@@ -12,6 +12,7 @@
 // We flag the partial/most-recent months so Mark warns rather than alarms.
 
 import { env } from "./env";
+import { prisma } from "./prisma";
 
 export interface MonthPL {
   month: string; // "2026-04"
@@ -120,4 +121,110 @@ export async function fetchFinancials(
   } catch (e) {
     return { ok: false, error: `could not reach financials reader: ${(e as Error).message}` };
   }
+}
+
+// ── DB-first reader (the Xero-credit saver) ─────────────────────────────────
+// Re-pulling CLOSED months from Xero is pure waste — they never change, and the
+// poster's /financials pull costs ~4 months x 2 entities = 8 Xero calls against
+// an uncertified ~1000/day-per-entity cap. So:
+//   1. Read every stored closed month from MonthlyFinancials (uploaded once on
+//      the /financials page from Tony's Xero P&L export) — ZERO Xero calls.
+//   2. Pull ONLY the current, still-moving month live from the poster
+//      (months=1) — 1 P&L per entity, cached 5 min — so today's figure stays
+//      fresh without re-fetching history.
+//   3. Merge (live current month overrides any stored copy of the same month).
+// The payload is tiny (24 months x 2 entities x 6 numbers ≈ a few KB) so Mark
+// gets FULL history in his prompt at almost no token or Xero cost.
+
+/** Brisbane "YYYY-MM" for the current month. */
+function currentMonthKey(): string {
+  const parts = new Intl.DateTimeFormat("en-CA", {
+    timeZone: "Australia/Brisbane",
+    year: "numeric",
+    month: "2-digit",
+  }).formatToParts(new Date());
+  const y = parts.find((p) => p.type === "year")?.value ?? "0000";
+  const m = parts.find((p) => p.type === "month")?.value ?? "00";
+  return `${y}-${m}`;
+}
+
+function dbRowToMonthPL(r: {
+  month: string;
+  totalIncome: number | null;
+  totalCostOfSales: number | null;
+  grossProfit: number | null;
+  totalOperatingExpenses: number | null;
+  netProfit: number | null;
+}): MonthPL {
+  return {
+    month: r.month,
+    from: `${r.month}-01`,
+    to: `${r.month}-01`,
+    partialMonthToDate: false,
+    totalIncome: r.totalIncome,
+    totalCostOfSales: r.totalCostOfSales,
+    grossProfit: r.grossProfit,
+    totalOperatingExpenses: r.totalOperatingExpenses,
+    netProfit: r.netProfit,
+  };
+}
+
+/**
+ * Financials for Mark's Q&A and the profit report. Reads stored history from
+ * the DB (no Xero calls) and overlays only the live current month. This is the
+ * function the brain should use — fetchFinancials() (live, all months) is kept
+ * for the rare "force a full live refresh" case.
+ *
+ * Non-fatal: if the live current-month pull fails we still return stored
+ * history with ok:true (Mark just won't have today's partial figure). If there
+ * is NO stored history AND the live pull fails, returns ok:false.
+ */
+export async function getFinancialsForQa(): Promise<FinancialsResult> {
+  const curKey = currentMonthKey();
+
+  // 1. Stored closed months from DB (zero Xero calls).
+  let scMonths: MonthPL[] = [];
+  let cqMonths: MonthPL[] = [];
+  try {
+    const rows = await prisma.monthlyFinancials.findMany({
+      orderBy: { month: "asc" },
+    });
+    for (const r of rows) {
+      const pl = dbRowToMonthPL(r);
+      if (r.entityCode === "SC") scMonths.push(pl);
+      else if (r.entityCode === "CQ") cqMonths.push(pl);
+    }
+  } catch {
+    // DB unreachable — fall through; live pull may still rescue us.
+  }
+
+  // 2. Live current month only (1 P&L per entity), reusing the 5-min cache.
+  const live = await fetchFinancials(1);
+  if (live.ok) {
+    const overlay = (stored: MonthPL[], tf?: TenantFinancials): MonthPL[] => {
+      const liveCur = tf?.months?.find((m) => m.month === curKey) ?? tf?.months?.[0];
+      if (!liveCur) return stored;
+      const filtered = stored.filter((m) => m.month !== liveCur.month);
+      return [...filtered, liveCur].sort((a, b) => a.month.localeCompare(b.month));
+    };
+    scMonths = overlay(scMonths, live.SC);
+    cqMonths = overlay(cqMonths, live.CQ);
+  }
+
+  if (!scMonths.length && !cqMonths.length) {
+    return {
+      ok: false,
+      error: live.ok ? "no stored history and no live months" : live.error,
+    };
+  }
+
+  const asOf = new Date().toISOString();
+  const sc: TenantFinancials | undefined = scMonths.length
+    ? { tenant: "SC", asOf, months: scMonths }
+    : undefined;
+  const cq: TenantFinancials | undefined = cqMonths.length
+    ? { tenant: "CQ", asOf, months: cqMonths }
+    : undefined;
+
+  return { ok: true, SC: sc, CQ: cq, consolidated: consolidate(sc, cq) };
 }

@@ -17,7 +17,7 @@ import { env } from "../env";
 import { fetchMarkMemory, formatMemoryAddendum, postTurn } from "../honcho";
 import { listOpenFindingsForQa } from "../hermes-findings";
 import { readLatestMetrics } from "./goals";
-import { fetchFinancials } from "../financials";
+import { getFinancialsForQa } from "../financials";
 
 interface AskInput {
   askedBy: string;
@@ -80,10 +80,11 @@ export async function askMark(input: AskInput): Promise<AskOutput> {
     input.sessionId
       ? fetchMarkMemory({ sessionId: input.sessionId, userPeer })
       : Promise.resolve({ resume: [], memoryBlock: null, disabled: !env.HONCHO_BASE_URL, errored: false }),
-    // Live P&L per entity (last 4 months + month-to-date) from the read-only
-    // poster feed. Lets Mark answer profit / income / expense questions with
-    // real Xero figures. Non-fatal: { ok:false } if the feed is unreachable.
-    fetchFinancials(4),
+    // P&L per entity. DB-first: stored closed months (zero Xero calls) plus
+    // ONLY the live current month (1 call/entity, cached). Lets Mark answer
+    // profit / income / expense questions with real figures while protecting the
+    // daily Xero cap. Non-fatal: { ok:false } if both DB and live are empty.
+    getFinancialsForQa(),
   ]);
 
   // Findings shape passed to Claude. Previously this was aggressively

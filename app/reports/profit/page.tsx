@@ -14,7 +14,7 @@
 // server-rendered, no client JS, draws instantly inside an iframe.
 
 import Link from "next/link";
-import { fetchFinancials, type MonthPL } from "@/lib/financials";
+import { getFinancialsForQa, type MonthPL } from "@/lib/financials";
 import { brisbane } from "@/lib/time";
 import { env } from "@/lib/env";
 import {
@@ -28,7 +28,7 @@ import {
 export const dynamic = "force-dynamic";
 
 export default async function ProfitReportPage() {
-  const fin = await fetchFinancials(6);
+  const fin = await getFinancialsForQa();
 
   if (!fin.ok) {
     return (
@@ -47,7 +47,9 @@ export default async function ProfitReportPage() {
   const monthSet = new Set<string>();
   fin.SC?.months.forEach((m) => monthSet.add(m.month));
   fin.CQ?.months.forEach((m) => monthSet.add(m.month));
-  const months = [...monthSet].sort((a, b) => a.localeCompare(b));
+  // Keep the chart readable: show the most recent 13 months (history lives in
+  // full on the Profit history page; the brain still gets every stored month).
+  const months = [...monthSet].sort((a, b) => a.localeCompare(b)).slice(-13);
 
   const byMonth = (t?: { months: MonthPL[] }) => {
     const map = new Map<string, MonthPL>();
