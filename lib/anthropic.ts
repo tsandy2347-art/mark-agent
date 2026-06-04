@@ -14,6 +14,7 @@
 
 import Anthropic from "@anthropic-ai/sdk";
 import { env } from "./env";
+import { brisbane } from "./time";
 import {
   CREATE_DRAFT_MANUAL_JOURNAL_TOOL,
   executeCreateDraftTool,
@@ -851,15 +852,20 @@ export async function answerQuestion(input: QaInput): Promise<QaOutput> {
     const baseSystem = input.memoryAddendum && input.memoryAddendum.trim()
       ? `${MARK_SYSTEM}\n${input.memoryAddendum}`
       : MARK_SYSTEM;
+    // Inject the current Brisbane wall-clock time into every turn so Mark can
+    // answer "what time is it / what's the date today" correctly. Without this
+    // he guesses from training data, which is months stale.
+    const nowLine = `\n\nRIGHT NOW it is ${brisbane(new Date())} (Brisbane / AEST). ` +
+      `Use this for any "what's the time / day / date today" question.`;
     // On voice, surgically remove the two persona lines that mandate the
-    // "Data as of <timestamp>" footer. The voice overlay alone can't override
-    // a doubled-up "Always end with…" instruction in the base persona.
+    // "Data as of <timestamp>" footer. Belt-and-braces — the voice overlay
+    // also tells him not to say it.
     const voiceCleaned = input.voiceMode
       ? baseSystem
           .replace(/Always end with "Data as of <Brisbane timestamp>"\./g, "")
           .replace(/- The "Data as of" footer is the only thing that's required on every turn —\s*\n\s*everything else should be NEW content responsive to the latest question\./g, "")
       : baseSystem;
-    const systemPrompt = input.voiceMode ? `${voiceCleaned}${MARK_VOICE_OVERLAY}` : baseSystem;
+    const systemPrompt = (input.voiceMode ? `${voiceCleaned}${MARK_VOICE_OVERLAY}` : baseSystem) + nowLine;
 
     // Tool wiring:
     //   - The two journal-writing tools are gated behind an explicit
