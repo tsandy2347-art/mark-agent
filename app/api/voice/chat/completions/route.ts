@@ -109,11 +109,12 @@ export async function POST(req: NextRequest) {
     Array.isArray(body.messages) ? body.messages : [],
   );
 
-  // One Vapi call == one continuous Honcho session, so Mark remembers within
-  // the call (and across calls, per the Honcho deriver). Fall back to a
-  // synthetic id for curl smoke-tests.
-  const rawSession = body.call?.id || body.callId || `voice-${Date.now()}`;
-  const sessionId = `mark-voice-${rawSession}`.replace(/[^A-Za-z0-9_-]/g, "").slice(0, 64);
+  // Memory is keyed to ONE permanent voice session per caller, not the Vapi
+  // call id — otherwise every hang-up wipes Mark's slate and he never
+  // remembers across calls. Voice is anonymous (no login), so all voice
+  // traffic shares Tony's stable session. Browser chat has its own logged-in
+  // sessions and isn't affected.
+  const sessionId = "mark-voice-tony";
 
   // If Vapi sends an empty opener (it does now, since firstMessage is empty and
   // the brain generates each greeting), prompt for a fresh, varied opener.
