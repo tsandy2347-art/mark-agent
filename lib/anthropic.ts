@@ -885,11 +885,11 @@ export async function answerQuestion(input: QaInput): Promise<QaOutput> {
     // Voice answers must be SHORT — cap generation hard so Mark physically can't
     // ramble (also caps model time: ~250 tokens ≈ 2-3 sentences vs 2000 ≈ an
     // essay that took 10-12s to produce). Browser chat keeps the full budget.
-    // Voice cap: 600 tokens — enough for a normal one-sentence answer (~50)
-    // PLUS the line-item exception (top 5-7 expense lines spoken out, ~400).
-    // Browser chat keeps the full 2000 budget.
-    const maxTokens = input.voiceMode ? 600 : 2000;
-    for (let iter = 0; iter < 3; iter++) {
+    // Voice cap: 900 tokens — enough for the line-item exception (top 5-7
+    // expense lines) AND a period comparison readout (two periods + a few
+    // top movers). Browser chat keeps the full 2000 budget.
+    const maxTokens = input.voiceMode ? 900 : 2000;
+    for (let iter = 0; iter < 5; iter++) {
       // Backend split:
       //   - "anthropic": direct SDK, fast, no learning loop.
       //   - "hermes":    route through hermes-jbc /v1/chat/completions so
