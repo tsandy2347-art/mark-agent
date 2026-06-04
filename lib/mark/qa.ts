@@ -72,13 +72,20 @@ export async function askMark(input: AskInput): Promise<AskOutput> {
   const dataAsOf = brisbane(now);
   const userPeer = input.askedBy || "anonymous";
 
+  // Voice turns are latency-critical and rarely need the full findings dump.
+  // Load a lighter slice for voice (fewer findings, shorter bodies) so the
+  // pre-model data fetch + prompt stay small. Browser chat keeps the full depth.
+  const isVoice = Boolean(input.voiceMode);
+  const findingsLimit = isVoice ? 60 : 400;
+  const findingsBodyCap = isVoice ? 600 : 2500;
+
   const [findings, metrics, statuses, memory, financials, payrollMonths] = await Promise.all([
     // Pull directly from the shared hermes-jbc findings DB — the table every
     // Hermes skill writes to. We bypass Mark's local IngestedFinding mirror
     // because the legacy specialist /api/findings poll cycle has been
     // decommissioned in Phase 2 of the consolidation plan. Skills write
     // direct, Mark reads direct, no middle layer.
-    listOpenFindingsForQa({ includePeopleFlag: includeRestricted, limit: 400 }),
+    listOpenFindingsForQa({ includePeopleFlag: includeRestricted, limit: findingsLimit }),
     readLatestMetrics(),
     prisma.specialistRunStatus.findMany(),
     input.sessionId
@@ -113,7 +120,7 @@ export async function askMark(input: AskInput): Promise<AskOutput> {
   // window has plenty of room; this is well worth it for drill-down quality.
   const compactFindings = findings.map((f) => {
     const fullBody = f.detail ?? "";
-    const body = fullBody.length > 2500 ? fullBody.slice(0, 2497) + "..." : fullBody;
+    const body = fullBody.length > findingsBodyCap ? fullBody.slice(0, findingsBodyCap - 3) + "..." : fullBody;
     return {
       agent: f.sourceAgent,
       severity: f.severity,
@@ -121,7 +128,7 @@ export async function askMark(input: AskInput): Promise<AskOutput> {
       detector: f.detector,
       title: f.title,
       body,
-      bodyTruncated: fullBody.length > 2500,
+      bodyTruncated: fullBody.length > findingsBodyCap,
       amount: f.amount,
       at: f.createdAt.toISOString(),
       // Per-detector evidence — Xero deep-links, source ids, narrations etc.

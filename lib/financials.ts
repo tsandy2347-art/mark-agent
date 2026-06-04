@@ -87,13 +87,39 @@ function consolidate(sc?: TenantFinancials, cq?: TenantFinancials) {
 const FINANCIALS_TTL_MS = 6 * 60 * 60 * 1000; // 6 hours
 type CacheEntry = { at: number; value: FinancialsResult };
 const financialsCache = new Map<number, CacheEntry>();
+const financialsInflight = new Map<number, Promise<FinancialsResult>>();
+
+/** The actual network pull (no cache logic) — used by both the blocking cold
+ *  path and the background refresh. */
+async function pullFinancials(monthsBack: number): Promise<FinancialsResult> {
+  const base = env.PAYROLL_POSTER_URL!.replace(/\/$/, "");
+  const res = await fetch(`${base}/financials?tenant=both&months=${monthsBack}`, {
+    headers: { Authorization: `Bearer ${env.PAYROLL_POSTER_API_KEY}` },
+    cache: "no-store",
+  });
+  const data = (await res.json().catch(() => null)) as
+    | { ok?: boolean; tenants?: { SC?: TenantFinancials; CQ?: TenantFinancials }; error?: string }
+    | null;
+  if (!res.ok || !data?.ok || !data.tenants) {
+    return { ok: false, error: data?.error || `financials pull failed (${res.status})` };
+  }
+  const sc = data.tenants.SC;
+  const cq = data.tenants.CQ;
+  const value: FinancialsResult = { ok: true, SC: sc, CQ: cq, consolidated: consolidate(sc, cq) };
+  financialsCache.set(monthsBack, { at: Date.now(), value });
+  return value;
+}
 
 /** Fetch the last `monthsBack` full months + current month-to-date P&L for both
  *  entities from the poster. Non-fatal: returns { ok:false } on any problem so
  *  the Q&A path can still answer from findings without crashing.
  *
- *  Cached for FINANCIALS_TTL_MS to keep voice turns fast. Pass
- *  `{ force: true }` to bypass the cache (e.g. a "refresh the numbers" intent). */
+ *  STALE-WHILE-REVALIDATE: if there's ANY cached value (even past its TTL) we
+ *  return it INSTANTLY and refresh in the BACKGROUND — so a voice turn never
+ *  waits ~4s for the live poster→Xero pull (the old behaviour blocked the turn
+ *  whenever the TTL lapsed). Only the very first (cold) call ever blocks. Pass
+ *  `{ force: true }` to wait for a guaranteed-fresh pull (e.g. "refresh the
+ *  numbers"). A failed background refresh leaves the last good value in place. */
 export async function fetchFinancials(
   monthsBack = 4,
   opts?: { force?: boolean },
@@ -102,30 +128,34 @@ export async function fetchFinancials(
     return { ok: false, error: "financials feed not wired (poster URL/key missing)" };
   }
 
-  if (!opts?.force) {
-    const hit = financialsCache.get(monthsBack);
-    if (hit && Date.now() - hit.at < FINANCIALS_TTL_MS) {
-      return hit.value;
+  if (opts?.force) {
+    try {
+      return await pullFinancials(monthsBack);
+    } catch (e) {
+      const stale = financialsCache.get(monthsBack);
+      if (stale) return stale.value;
+      return { ok: false, error: `could not reach financials reader: ${(e as Error).message}` };
     }
   }
 
-  const base = env.PAYROLL_POSTER_URL.replace(/\/$/, "");
-  try {
-    const res = await fetch(`${base}/financials?tenant=both&months=${monthsBack}`, {
-      headers: { Authorization: `Bearer ${env.PAYROLL_POSTER_API_KEY}` },
-      cache: "no-store",
-    });
-    const data = (await res.json().catch(() => null)) as
-      | { ok?: boolean; tenants?: { SC?: TenantFinancials; CQ?: TenantFinancials }; error?: string }
-      | null;
-    if (!res.ok || !data?.ok || !data.tenants) {
-      return { ok: false, error: data?.error || `financials pull failed (${res.status})` };
+  const hit = financialsCache.get(monthsBack);
+  const fresh = hit && Date.now() - hit.at < FINANCIALS_TTL_MS;
+
+  if (hit) {
+    // Serve cached immediately. If stale, kick a single background refresh
+    // (deduped via the inflight map) so the NEXT turn sees fresher data.
+    if (!fresh && !financialsInflight.has(monthsBack)) {
+      const p = pullFinancials(monthsBack)
+        .catch(() => hit.value) // keep last good on failure
+        .finally(() => financialsInflight.delete(monthsBack));
+      financialsInflight.set(monthsBack, p);
     }
-    const sc = data.tenants.SC;
-    const cq = data.tenants.CQ;
-    const value: FinancialsResult = { ok: true, SC: sc, CQ: cq, consolidated: consolidate(sc, cq) };
-    financialsCache.set(monthsBack, { at: Date.now(), value });
-    return value;
+    return hit.value;
+  }
+
+  // Cold: nothing cached yet — must block on a real pull this once.
+  try {
+    return await pullFinancials(monthsBack);
   } catch (e) {
     return { ok: false, error: `could not reach financials reader: ${(e as Error).message}` };
   }
