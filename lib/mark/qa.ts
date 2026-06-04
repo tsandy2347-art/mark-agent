@@ -129,6 +129,22 @@ export async function askMark(input: AskInput): Promise<AskOutput> {
   // below can be ~700KB and the brain backend truncates long input, which is
   // why financials buried inside `data` never reached Mark. We hoist it into
   // priorityData (rendered at the very top of the prompt).
+  //
+  // Line-item detail is heavy (~45 lines/month x 24 months x 2 entities ≈ 2,500
+  // rows ≈ 200KB) — dumping ALL of it bloats the prompt and pushes the block
+  // past the truncation limit, which actually GARBLES the numbers. So we keep
+  // totals for every month, but attach the detailed `lineItems` ONLY to the
+  // most recent N months — that covers virtually every expense-breakdown
+  // question while keeping the payload lean and accurate.
+  const LINEITEM_MONTHS = 6;
+  const withRecentDetailOnly = (ms: Array<{ month: string; lineItems?: unknown }> | undefined) => {
+    if (!ms) return null;
+    const recent = new Set(
+      [...ms].sort((a, b) => b.month.localeCompare(a.month)).slice(0, LINEITEM_MONTHS).map((m) => m.month),
+    );
+    return ms.map((m) => (recent.has(m.month) ? m : { ...m, lineItems: undefined }));
+  };
+
   const financialsBlock = financials.ok
     ? {
         note:
@@ -139,14 +155,15 @@ export async function askMark(input: AskInput): Promise<AskOutput> {
           "most-recent completed month are UNDER-BOOKED on income and will show a " +
           "FALSE loss. Do NOT report a recent-month loss as real — explain the lag " +
           "and cite the last FULLY-settled month as the trustworthy figure. " +
-          "EXPENSE/INCOME BREAKDOWN: each month carries a `lineItems` array of " +
+          "EXPENSE/INCOME BREAKDOWN: recent months carry a `lineItems` array of " +
           "{section, account, amount} (section is income|costOfSales|otherIncome|" +
-          "operating). Use it to answer 'what were the expenses', 'biggest cost', " +
-          "'how much on wages' etc. — these come from uploaded Xero history, so " +
-          "you can break any month down WITHOUT needing a live lookup. Months " +
-          "without a lineItems array are live-pulled current months (totals only).",
-        SC: financials.SC?.months ?? null,
-        CQ: financials.CQ?.months ?? null,
+          "operating) — use it for 'what were the expenses', 'biggest cost', 'how " +
+          "much on wages' etc., quoting the amounts EXACTLY as given (do not " +
+          "round-guess). Older months and live current months show totals only; " +
+          "if asked to break down a month with no lineItems, say you have the " +
+          "totals for it but can pull the detail if they upload that month.",
+        SC: withRecentDetailOnly(financials.SC?.months),
+        CQ: withRecentDetailOnly(financials.CQ?.months),
         consolidated: financials.consolidated ?? null,
       }
     : { unavailable: true, reason: financials.error };
