@@ -852,19 +852,21 @@ export async function answerQuestion(input: QaInput): Promise<QaOutput> {
     const baseSystem = input.memoryAddendum && input.memoryAddendum.trim()
       ? `${MARK_SYSTEM}\n${input.memoryAddendum}`
       : MARK_SYSTEM;
-    // Inject the current Brisbane wall-clock time into every turn so Mark can
-    // answer "what time is it / what's the date today" correctly. Without this
-    // he guesses from training data, which is months stale.
-    // Voice gets a spoken-friendly 12-hour format with no "AEST" (he mangles
-    // it aloud); browser chat keeps the full timestamp.
+    // Inject the current Brisbane wall-clock time. CRITICAL: Sonnet's safety
+    // reflex makes it say "I don't have a clock" by default. Override that
+    // directly — this is a system-provided fact, not a guess.
     const now = new Date();
     const nowLine = input.voiceMode
-      ? `\n\nRIGHT NOW it is ${brisbaneVoice(now)} in Brisbane. ` +
-        `Use this for any "what's the time / day / date today" question. ` +
-        `Speak the time in 12-hour format (e.g. "two thirty in the afternoon"). ` +
-        `Never say "AEST" out loud.`
-      : `\n\nRIGHT NOW it is ${brisbane(now)} (Brisbane / AEST). ` +
-        `Use this for any "what's the time / day / date today" question.`;
+      ? `\n\n=== CURRENT TIME (system-provided, authoritative) ===\n` +
+        `It is currently ${brisbaneVoice(now)} in Brisbane.\n` +
+        `When asked the time, day, or date, ANSWER WITH THIS — do NOT say ` +
+        `"I don't have a clock" or "I can't access real-time data". You DO ` +
+        `have the time; it is provided right above. Speak it in 12-hour format ` +
+        `(e.g. "it's about two thirty in the afternoon, Sir"). Never say "AEST" aloud.`
+      : `\n\n=== CURRENT TIME (system-provided, authoritative) ===\n` +
+        `It is currently ${brisbane(now)} in Brisbane.\n` +
+        `When asked the time, day, or date, answer with this directly — ` +
+        `do NOT say you don't have access to real-time data. You do.`;
     // On voice, surgically remove the two persona lines that mandate the
     // "Data as of <timestamp>" footer. Belt-and-braces — the voice overlay
     // also tells him not to say it.
