@@ -79,6 +79,7 @@ export async function askMark(input: AskInput): Promise<AskOutput> {
   const findingsLimit = isVoice ? 60 : 400;
   const findingsBodyCap = isVoice ? 600 : 2500;
 
+  const __t0 = Date.now();
   const [findings, metrics, statuses, memory, financials, payrollMonths] = await Promise.all([
     // Pull directly from the shared hermes-jbc findings DB — the table every
     // Hermes skill writes to. We bypass Mark's local IngestedFinding mirror
@@ -103,9 +104,10 @@ export async function askMark(input: AskInput): Promise<AskOutput> {
       select: { entityCode: true, month: true, totalGross: true, totalSuper: true, totalAllowances: true, totalLeaveTaken: true },
     }),
   ]);
-
+  if (isVoice) {
+    console.log(`[voice-timing] data-load ${Date.now() - __t0}ms (findings=${findings.length})`);
+  }
   // Findings shape passed to Claude. Previously this was aggressively
-  // compacted (body capped at 600 chars, evidence stripped, explanation
   // omitted) which meant Mark physically had nothing to drill into when
   // the user asked a follow-up like "tell me more about X". He'd just
   // re-summarise the same 600 chars. We now include:
@@ -211,6 +213,7 @@ export async function askMark(input: AskInput): Promise<AskOutput> {
       }
     : { note: "No payroll data uploaded yet (Payroll detail page)." };
 
+  const __tModel = Date.now();
   const { answer, toolCallsFired } = await answerQuestion({
     question: input.question,
     dataAsOf,
@@ -225,6 +228,9 @@ export async function askMark(input: AskInput): Promise<AskOutput> {
     // create_draft_manual_journal tool. Always populated — "user:nicole" etc.
     draftJournalTriggeredBy: `user:${userPeer}`,
   });
+  if (isVoice) {
+    console.log(`[voice-timing] prep->model-done ${Date.now() - __tModel}ms (answer ${answer.length} chars)`);
+  }
 
   // Audit log: if the user attached files, record the filenames in the
   // question text so FinanceQuery shows "[Attached: a.pdf, b.xlsx, c.png] ..."
