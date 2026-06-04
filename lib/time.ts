@@ -10,6 +10,18 @@ export function brisbane(d: Date | string): string {
   return dt.setZone(ZONE).toFormat("ccc d LLL yyyy, HH:mm 'AEST'");
 }
 
+/** Spoken-friendly Brisbane time for voice. "Friday the 5th of June 2026, 2:32 pm".
+ *  12-hour clock, no "AEST" (Mark mangles it aloud). */
+export function brisbaneVoice(d: Date | string): string {
+  const dt = (typeof d === "string" ? DateTime.fromISO(d) : DateTime.fromJSDate(d)).setZone(ZONE);
+  const day = dt.day;
+  const suffix =
+    day % 10 === 1 && day !== 11 ? "st" :
+    day % 10 === 2 && day !== 12 ? "nd" :
+    day % 10 === 3 && day !== 13 ? "rd" : "th";
+  return dt.toFormat(`cccc 'the' d'${suffix} of' LLLL yyyy, h:mm a`).replace(" AM", " am").replace(" PM", " pm");
+}
+
 /** Short: "25 May 17:24". */
 export function brisbaneShort(d: Date | string): string {
   const dt = typeof d === "string" ? DateTime.fromISO(d) : DateTime.fromJSDate(d);

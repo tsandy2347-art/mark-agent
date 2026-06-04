@@ -14,7 +14,7 @@
 
 import Anthropic from "@anthropic-ai/sdk";
 import { env } from "./env";
-import { brisbane } from "./time";
+import { brisbane, brisbaneVoice } from "./time";
 import {
   CREATE_DRAFT_MANUAL_JOURNAL_TOOL,
   executeCreateDraftTool,
@@ -855,8 +855,16 @@ export async function answerQuestion(input: QaInput): Promise<QaOutput> {
     // Inject the current Brisbane wall-clock time into every turn so Mark can
     // answer "what time is it / what's the date today" correctly. Without this
     // he guesses from training data, which is months stale.
-    const nowLine = `\n\nRIGHT NOW it is ${brisbane(new Date())} (Brisbane / AEST). ` +
-      `Use this for any "what's the time / day / date today" question.`;
+    // Voice gets a spoken-friendly 12-hour format with no "AEST" (he mangles
+    // it aloud); browser chat keeps the full timestamp.
+    const now = new Date();
+    const nowLine = input.voiceMode
+      ? `\n\nRIGHT NOW it is ${brisbaneVoice(now)} in Brisbane. ` +
+        `Use this for any "what's the time / day / date today" question. ` +
+        `Speak the time in 12-hour format (e.g. "two thirty in the afternoon"). ` +
+        `Never say "AEST" out loud.`
+      : `\n\nRIGHT NOW it is ${brisbane(now)} (Brisbane / AEST). ` +
+        `Use this for any "what's the time / day / date today" question.`;
     // On voice, surgically remove the two persona lines that mandate the
     // "Data as of <timestamp>" footer. Belt-and-braces — the voice overlay
     // also tells him not to say it.
