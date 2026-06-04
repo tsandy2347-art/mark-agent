@@ -850,7 +850,15 @@ export async function answerQuestion(input: QaInput): Promise<QaOutput> {
     const baseSystem = input.memoryAddendum && input.memoryAddendum.trim()
       ? `${MARK_SYSTEM}\n${input.memoryAddendum}`
       : MARK_SYSTEM;
-    const systemPrompt = input.voiceMode ? `${baseSystem}${MARK_VOICE_OVERLAY}` : baseSystem;
+    // On voice, surgically remove the two persona lines that mandate the
+    // "Data as of <timestamp>" footer. The voice overlay alone can't override
+    // a doubled-up "Always end with…" instruction in the base persona.
+    const voiceCleaned = input.voiceMode
+      ? baseSystem
+          .replace(/Always end with "Data as of <Brisbane timestamp>"\./g, "")
+          .replace(/- The "Data as of" footer is the only thing that's required on every turn —\s*\n\s*everything else should be NEW content responsive to the latest question\./g, "")
+      : baseSystem;
+    const systemPrompt = input.voiceMode ? `${voiceCleaned}${MARK_VOICE_OVERLAY}` : baseSystem;
 
     // Tool wiring:
     //   - The two journal-writing tools are gated behind an explicit
