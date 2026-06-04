@@ -28,6 +28,10 @@ import {
   TRIGGER_SPECIALIST_RUN_TOOL,
   executeTriggerSpecialistRunTool,
 } from "./mark/specialist-trigger-tool";
+import {
+  LOOKUP_MONTH_DETAIL_TOOL,
+  executeLookupMonthDetailTool,
+} from "./mark/financials-lookup-tool";
 import { callHermesAsAnthropic } from "./mark/hermes-client";
 
 let _client: Anthropic | null = null;
@@ -839,7 +843,7 @@ export async function answerQuestion(input: QaInput): Promise<QaOutput> {
     //   - trigger_specialist_run is read-only on the JBC side (kicks a
     //     specialist's existing audit pipeline) so it's always on.
     const draftToolsEnabled = Boolean(input.draftJournalTriggeredBy);
-    const tools: Anthropic.Messages.Tool[] = [TRIGGER_SPECIALIST_RUN_TOOL];
+    const tools: Anthropic.Messages.Tool[] = [TRIGGER_SPECIALIST_RUN_TOOL, LOOKUP_MONTH_DETAIL_TOOL];
     if (draftToolsEnabled) {
       tools.push(CREATE_DRAFT_MANUAL_JOURNAL_TOOL, CREATE_PAYROLL_JOURNAL_TOOL);
     }
@@ -930,6 +934,17 @@ export async function answerQuestion(input: QaInput): Promise<QaOutput> {
           toolCallsFired++;
           const result = await executeTriggerSpecialistRunTool(
             tu.input as { specialist?: unknown },
+          );
+          toolResultBlocks.push({
+            type: "tool_result",
+            tool_use_id: tu.id,
+            content: JSON.stringify(result),
+            is_error: !result.ok,
+          });
+        } else if (tu.name === LOOKUP_MONTH_DETAIL_TOOL.name) {
+          toolCallsFired++;
+          const result = await executeLookupMonthDetailTool(
+            tu.input as { entity?: unknown; month?: unknown },
           );
           toolResultBlocks.push({
             type: "tool_result",

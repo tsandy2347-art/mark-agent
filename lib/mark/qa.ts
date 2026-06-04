@@ -130,40 +130,31 @@ export async function askMark(input: AskInput): Promise<AskOutput> {
   // why financials buried inside `data` never reached Mark. We hoist it into
   // priorityData (rendered at the very top of the prompt).
   //
-  // Line-item detail is heavy (~45 lines/month x 24 months x 2 entities ≈ 2,500
-  // rows ≈ 200KB) — dumping ALL of it bloats the prompt and pushes the block
-  // past the truncation limit, which actually GARBLES the numbers. So we keep
-  // totals for every month, but attach the detailed `lineItems` ONLY to the
-  // most recent N months — that covers virtually every expense-breakdown
-  // question while keeping the payload lean and accurate.
-  const LINEITEM_MONTHS = 6;
-  const withRecentDetailOnly = (ms: Array<{ month: string; lineItems?: unknown }> | undefined) => {
-    if (!ms) return null;
-    const recent = new Set(
-      [...ms].sort((a, b) => b.month.localeCompare(a.month)).slice(0, LINEITEM_MONTHS).map((m) => m.month),
-    );
-    return ms.map((m) => (recent.has(m.month) ? m : { ...m, lineItems: undefined }));
-  };
+  // We carry TOTALS for every month only (income, costs, net profit) — small and
+  // accurate. The heavy per-account line items live in the DB; Mark fetches the
+  // detail for a specific month ON DEMAND via the lookup_month_detail tool when
+  // the user asks for a breakdown. This keeps the prompt lean (so the numbers
+  // never get garbled by truncation) while still giving full drill-down.
+  const stripDetail = (ms: Array<{ lineItems?: unknown }> | undefined) =>
+    ms ? ms.map(({ lineItems: _drop, ...rest }) => rest) : null;
 
   const financialsBlock = financials.ok
     ? {
         note:
-          "Per-entity Profit & Loss (AUD). SC and CQ are SEPARATE legal " +
-          "entities/taxpayers — 'consolidated' is a management sum only, NEVER " +
-          "statutory. CRITICAL ARREARS CAVEAT: JBC bills most care in arrears, so " +
-          "any month with partialMonthToDate=true (the current month) AND the single " +
-          "most-recent completed month are UNDER-BOOKED on income and will show a " +
-          "FALSE loss. Do NOT report a recent-month loss as real — explain the lag " +
-          "and cite the last FULLY-settled month as the trustworthy figure. " +
-          "EXPENSE/INCOME BREAKDOWN: recent months carry a `lineItems` array of " +
-          "{section, account, amount} (section is income|costOfSales|otherIncome|" +
-          "operating) — use it for 'what were the expenses', 'biggest cost', 'how " +
-          "much on wages' etc., quoting the amounts EXACTLY as given (do not " +
-          "round-guess). Older months and live current months show totals only; " +
-          "if asked to break down a month with no lineItems, say you have the " +
-          "totals for it but can pull the detail if they upload that month.",
-        SC: withRecentDetailOnly(financials.SC?.months),
-        CQ: withRecentDetailOnly(financials.CQ?.months),
+          "Per-entity Profit & Loss (AUD), TOTALS per month. SC and CQ are " +
+          "SEPARATE legal entities/taxpayers — 'consolidated' is a management sum " +
+          "only, NEVER statutory. CRITICAL ARREARS CAVEAT: JBC bills most care in " +
+          "arrears, so any month with partialMonthToDate=true (the current month) " +
+          "AND the single most-recent completed month are UNDER-BOOKED on income " +
+          "and will show a FALSE loss. Do NOT report a recent-month loss as real — " +
+          "explain the lag and cite the last FULLY-settled month as the " +
+          "trustworthy figure. EXPENSE/INCOME BREAKDOWN: these are TOTALS only. " +
+          "When the user asks what made up a month — biggest expenses, how much on " +
+          "wages, income by account, etc. — call the lookup_month_detail tool with " +
+          "the entity and month to get the line-by-line accounts, then quote those " +
+          "amounts EXACTLY. Don't guess a breakdown from the totals.",
+        SC: stripDetail(financials.SC?.months),
+        CQ: stripDetail(financials.CQ?.months),
         consolidated: financials.consolidated ?? null,
       }
     : { unavailable: true, reason: financials.error };
