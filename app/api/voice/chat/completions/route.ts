@@ -175,44 +175,63 @@ export async function POST(req: NextRequest) {
       controller.enqueue(encoder.encode(sseChunk(id, created, { role: "assistant", content: "" }, null)));
 
       let emittedAny = false;
-      // Sentence-level filter: Mark's training will tail-pin "Data as of …"
-      // regardless of prompt. Buffer until we see a sentence boundary, then
-      // drop the sentence if it contains the timestamp-footer phrase. Cheap
-      // (~300ms extra latency on the last sentence) and bulletproof.
-      let buf = "";
+      // Stream deltas straight through to Vapi as Claude produces them — same
+      // pattern Adam uses, no sentence-level buffering. Vapi starts speaking
+      // ~1s in instead of waiting up to 5s for sentence boundaries.
+      //
+      // Timestamp-footer scrub: Mark's training tail-pins "Data as of …" no
+      // matter how hard the prompt fights it. We keep a SMALL trailing buffer
+      // (last 220 chars) un-emitted so we can retroactively drop a trailing
+      // "Data as of …" sentence at the end of the reply WITHOUT delaying the
+      // body of the answer.
+      const TAIL_HOLD = 220; // big enough to hold the longest plausible footer
       const TIMESTAMP_PATTERNS = [
         /data\s+as\s+of/i,
         /\bas\s+of\s+(?:the\s+)?(?:\d|today|this|yesterday|that)/i,
         /aest\b/i,
         /\bbrisbane\s+time\b/i,
       ];
-      const emit = (s: string) => {
+      let tail = "";
+      const rawEmit = (s: string) => {
         if (!s) return;
         emittedAny = true;
         controller.enqueue(encoder.encode(sseChunk(id, created, { content: s }, null)));
       };
-      const flushSentence = (sentence: string) => {
-        if (!sentence.trim()) return;
-        if (TIMESTAMP_PATTERNS.some((re) => re.test(sentence))) return; // drop
-        emit(sentence);
-      };
       const onText = (delta: string) => {
         if (!delta) return;
-        buf += delta;
-        // Emit complete sentences as they form; hold the trailing partial.
-        let m: RegExpExecArray | null;
-        const sentenceEnd = /[.!?](\s+|$)/g;
-        let lastIdx = 0;
-        while ((m = sentenceEnd.exec(buf)) !== null) {
-          const end = m.index + m[0].length;
-          flushSentence(buf.slice(lastIdx, end));
-          lastIdx = end;
+        tail += delta;
+        // Once the tail buffer exceeds TAIL_HOLD, flush everything except the
+        // last TAIL_HOLD chars so we still have room to scrub a trailing
+        // footer at the end of the reply.
+        if (tail.length > TAIL_HOLD) {
+          const flushable = tail.slice(0, tail.length - TAIL_HOLD);
+          tail = tail.slice(tail.length - TAIL_HOLD);
+          rawEmit(flushable);
         }
-        buf = buf.slice(lastIdx);
       };
       const flushFinal = () => {
-        if (buf.trim()) flushSentence(buf);
-        buf = "";
+        if (!tail) return;
+        // Scrub: find the last sentence boundary in the tail. If the tail
+        // sentence matches a timestamp pattern, drop it; otherwise emit.
+        // We only consider the FINAL sentence — earlier sentences in the
+        // tail already passed through unchecked (Mark only tail-pins the
+        // footer at the very end of a reply).
+        const lastBoundary = tail.search(/[.!?]\s+[^\s][^.!?]*$/);
+        if (lastBoundary >= 0) {
+          const head = tail.slice(0, lastBoundary + 1); // include the punctuation
+          const trailing = tail.slice(lastBoundary + 1);
+          rawEmit(head);
+          if (!TIMESTAMP_PATTERNS.some((re) => re.test(trailing))) {
+            rawEmit(trailing);
+          }
+        } else {
+          // No sentence boundary in the tail — it's one short sentence/clause.
+          // Only drop it if it matches the footer pattern.
+          if (!TIMESTAMP_PATTERNS.some((re) => re.test(tail))) {
+            rawEmit(tail);
+          }
+        }
+        tail = "";
       };
 
       try {
