@@ -88,9 +88,14 @@ export async function askMark(input: AskInput): Promise<AskOutput> {
     listOpenFindingsForQa({ includePeopleFlag: includeRestricted, limit: findingsLimit }),
     readLatestMetrics(),
     prisma.specialistRunStatus.findMany(),
-    input.sessionId
-      ? fetchMarkMemory({ sessionId: input.sessionId, userPeer, timeoutMs: isVoice ? 1500 : undefined })
-      : Promise.resolve({ resume: [], memoryBlock: null, disabled: !env.HONCHO_BASE_URL, errored: false }),
+    // Memory: SKIP entirely on voice. The self-hosted Honcho instance responds
+    // in 2-4s — slower than any voice budget — so it timed out every single
+    // voice turn anyway (Mark never actually got memory, just paid the wait).
+    // Until Honcho is sped up, voice runs memory-free for snappy turns; browser
+    // chat still uses it (latency-tolerant). Re-enable by removing this gate.
+    input.sessionId && !isVoice
+      ? fetchMarkMemory({ sessionId: input.sessionId, userPeer })
+      : Promise.resolve({ resume: [], memoryBlock: null, disabled: true, errored: false }),
     // P&L per entity. DB-first: stored closed months (zero Xero calls) plus
     // ONLY the live current month (1 call/entity, cached). Lets Mark answer
     // profit / income / expense questions with real figures while protecting the
@@ -241,14 +246,11 @@ export async function askMark(input: AskInput): Promise<AskOutput> {
     },
   });
 
-  // Persist the turn to Honcho. For VOICE this is fire-and-forget — we do NOT
-  // await it, because the answer has already streamed to the caller and the
-  // Honcho writes (which can each hit a multi-second timeout when Honcho is
-  // slow) would otherwise hold the request open and delay the NEXT turn. For
-  // browser chat we still await so the transcript is consistent before we
-  // return. Errors are swallowed inside postTurn either way.
-  if (input.sessionId) {
-    const writes = Promise.all([
+  // Persist the turn to Honcho. SKIP on voice — Honcho is too slow right now
+  // and the writes just time out (memory is disabled on voice anyway, see the
+  // fetch gate above). Browser chat still writes so its transcript builds.
+  if (input.sessionId && !isVoice) {
+    await Promise.all([
       postTurn({
         sessionId: input.sessionId,
         peerId: userPeer,
@@ -260,12 +262,6 @@ export async function askMark(input: AskInput): Promise<AskOutput> {
         content: answer,
       }),
     ]);
-    if (isVoice) {
-      // Don't block the voice turn on memory writes.
-      void writes.catch(() => {});
-    } else {
-      await writes;
-    }
   }
 
   return {
