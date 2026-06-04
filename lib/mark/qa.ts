@@ -68,7 +68,7 @@ export async function askMark(input: AskInput): Promise<AskOutput> {
   const dataAsOf = brisbane(now);
   const userPeer = input.askedBy || "anonymous";
 
-  const [findings, metrics, statuses, memory, financials] = await Promise.all([
+  const [findings, metrics, statuses, memory, financials, payrollMonths] = await Promise.all([
     // Pull directly from the shared hermes-jbc findings DB — the table every
     // Hermes skill writes to. We bypass Mark's local IngestedFinding mirror
     // because the legacy specialist /api/findings poll cycle has been
@@ -85,6 +85,12 @@ export async function askMark(input: AskInput): Promise<AskOutput> {
     // profit / income / expense questions with real figures while protecting the
     // daily Xero cap. Non-fatal: { ok:false } if both DB and live are empty.
     getFinancialsForQa(),
+    // Payroll month TOTALS (gross/super/allowances) per entity. Mark fetches the
+    // per-pay-type detail on demand via lookup_payroll_detail. Cheap small read.
+    prisma.payrollMonth.findMany({
+      orderBy: { month: "desc" },
+      select: { entityCode: true, month: true, totalGross: true, totalSuper: true, totalAllowances: true, totalLeaveTaken: true },
+    }),
   ]);
 
   // Findings shape passed to Claude. Previously this was aggressively
@@ -170,11 +176,35 @@ export async function askMark(input: AskInput): Promise<AskOutput> {
     })),
   };
 
+  // Payroll month TOTALS (per entity), newest first. Detail is fetched on demand
+  // via lookup_payroll_detail. Hoisted into priorityData so it survives prompt
+  // truncation alongside the P&L.
+  const payrollBlock = payrollMonths.length
+    ? {
+        note:
+          "Monthly labour cost from MYOB payroll (weekly pay runs grouped into the " +
+          "month). TOTALS only: gross = actual wage cost, super = employer super, " +
+          "allowances, leaveTaken. For the pay-TYPE breakdown (overtime, casual " +
+          "loading, travel, weekend loadings, individual leave types, etc.) call " +
+          "the lookup_payroll_detail tool with entity+month. NOT split by funding " +
+          "stream (NDIS vs Home Care) — payroll codes carry pay type, not client " +
+          "programme; say so if asked for stream-level wages.",
+        months: payrollMonths.map((p) => ({
+          entity: p.entityCode,
+          month: p.month,
+          gross: p.totalGross,
+          super: p.totalSuper,
+          allowances: p.totalAllowances,
+          leaveTaken: p.totalLeaveTaken,
+        })),
+      }
+    : { note: "No payroll data uploaded yet (Payroll detail page)." };
+
   const { answer, toolCallsFired } = await answerQuestion({
     question: input.question,
     dataAsOf,
     data,
-    priorityData: financialsBlock,
+    priorityData: { financials: financialsBlock, payroll: payrollBlock },
     attachments: input.attachments,
     history: input.history,
     memoryAddendum: formatMemoryAddendum(memory),

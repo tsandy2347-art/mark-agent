@@ -320,3 +320,35 @@ model MonthlyFinancials {
   @@unique([entityCode, month])
   @@index([entityCode, month])
 }
+
+/**
+ * PayrollMonth — Mark's monthly labour-cost breakdown, grouped from MYOB weekly
+ * pay runs (Tony's choice: weekly runs rolled into the month their pay date
+ * falls in, to line up with the monthly P&L). One row per (entity, month).
+ *
+ * WHY: the P&L shows wages as one lump. This breaks labour cost down by PAY TYPE
+ * (ordinary hours, overtime, casual loading, weekend/shift loadings, travel,
+ * leave, super, allowances) so Mark can answer real CFO questions like "how much
+ * overtime did SC pay in May" or "what's our travel-allowance spend". `lineItems`
+ * is an array of { payType, category, amount }. NOTE: this is NOT split by
+ * funding stream (NDIS vs Home Care) — MYOB pay codes describe pay TYPE, not the
+ * client programme; that split would need an AlayaCare visit join.
+ */
+model PayrollMonth {
+  id                String   @id @default(cuid())
+  entityCode        String   // "SC" | "CQ"
+  month             String   // "YYYY-MM"
+  totalGross        Float?   // sum of Income-type lines (actual wage cost)
+  totalSuper        Float?   // Employer Super
+  totalAllowances   Float?   // Allowances
+  totalLeaveTaken   Float?   // leave actually taken (Entitlement Payment)
+  payRuns           Json?    // pay-run IDs rolled into this month (audit)
+  lineItems         Json?    // [{ payType, category, amount }], biggest first
+  sourceFilename    String?
+  uploadedBy        String
+  uploadedAt        DateTime @default(now())
+  updatedAt         DateTime @updatedAt
+
+  @@unique([entityCode, month])
+  @@index([entityCode, month])
+}
