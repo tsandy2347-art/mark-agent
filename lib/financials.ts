@@ -67,13 +67,39 @@ function consolidate(sc?: TenantFinancials, cq?: TenantFinancials) {
     }));
 }
 
+// ── In-process cache ────────────────────────────────────────────────────────
+// The poster's /financials pull hits Xero live and takes ~9s. That's the single
+// biggest source of latency on a voice turn (Mark re-pulled 4 months of P&L on
+// EVERY spoken sentence). The P&L barely moves minute-to-minute, so we cache the
+// last good result per monthsBack for a short TTL and serve repeat turns
+// instantly. A failed pull is NOT cached (so we retry next turn). Cache lives in
+// module memory — shared across requests on a warm instance, which covers the
+// rapid-fire turns within a single voice call. Cold starts simply re-pull once.
+const FINANCIALS_TTL_MS = 5 * 60 * 1000; // 5 minutes
+type CacheEntry = { at: number; value: FinancialsResult };
+const financialsCache = new Map<number, CacheEntry>();
+
 /** Fetch the last `monthsBack` full months + current month-to-date P&L for both
  *  entities from the poster. Non-fatal: returns { ok:false } on any problem so
- *  the Q&A path can still answer from findings without crashing. */
-export async function fetchFinancials(monthsBack = 4): Promise<FinancialsResult> {
+ *  the Q&A path can still answer from findings without crashing.
+ *
+ *  Cached for FINANCIALS_TTL_MS to keep voice turns fast. Pass
+ *  `{ force: true }` to bypass the cache (e.g. a "refresh the numbers" intent). */
+export async function fetchFinancials(
+  monthsBack = 4,
+  opts?: { force?: boolean },
+): Promise<FinancialsResult> {
   if (!env.PAYROLL_POSTER_URL || !env.PAYROLL_POSTER_API_KEY) {
     return { ok: false, error: "financials feed not wired (poster URL/key missing)" };
   }
+
+  if (!opts?.force) {
+    const hit = financialsCache.get(monthsBack);
+    if (hit && Date.now() - hit.at < FINANCIALS_TTL_MS) {
+      return hit.value;
+    }
+  }
+
   const base = env.PAYROLL_POSTER_URL.replace(/\/$/, "");
   try {
     const res = await fetch(`${base}/financials?tenant=both&months=${monthsBack}`, {
@@ -88,7 +114,9 @@ export async function fetchFinancials(monthsBack = 4): Promise<FinancialsResult>
     }
     const sc = data.tenants.SC;
     const cq = data.tenants.CQ;
-    return { ok: true, SC: sc, CQ: cq, consolidated: consolidate(sc, cq) };
+    const value: FinancialsResult = { ok: true, SC: sc, CQ: cq, consolidated: consolidate(sc, cq) };
+    financialsCache.set(monthsBack, { at: Date.now(), value });
+    return value;
   } catch (e) {
     return { ok: false, error: `could not reach financials reader: ${(e as Error).message}` };
   }
