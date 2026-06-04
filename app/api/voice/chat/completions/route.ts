@@ -174,9 +174,40 @@ export async function POST(req: NextRequest) {
       controller.enqueue(encoder.encode(sseChunk(id, created, { role: "assistant", content: "" }, null)));
 
       let emittedAny = false;
+      // Mark's training makes him want to tail every answer with
+      // "Data as of <timestamp>" no matter what the prompt says. We strip it
+      // out of the audio stream as a hard guarantee. We buffer the last ~80
+      // chars, watch for the phrase to start, and once it does we stop
+      // emitting for the rest of the turn. Vapi never hears it.
+      let tail = "";
+      let muted = false;
+      const TRIGGERS = [
+        /data\s+as\s+of/i,
+        /\bas\s+of[\s,]+(?:the|today|this|on)\b/i,
+      ];
       const onText = (delta: string) => {
-        if (!delta) return;
+        if (!delta || muted) return;
         emittedAny = true;
+        tail = (tail + delta).slice(-120);
+        if (TRIGGERS.some((re) => re.test(tail))) {
+          // Find the start of the offending phrase in the current delta and
+          // emit only what came before it, then mute the rest of the turn.
+          let cut = delta.length;
+          for (const re of TRIGGERS) {
+            const m = re.exec(tail);
+            if (m) {
+              const tailIdx = m.index;
+              // Map tail index back into the current delta's slice.
+              const before = tail.length - delta.length;
+              const inDelta = Math.max(0, tailIdx - before);
+              if (inDelta < cut) cut = inDelta;
+            }
+          }
+          const safe = delta.slice(0, cut).replace(/[\s,.;:—-]+$/, "");
+          if (safe) controller.enqueue(encoder.encode(sseChunk(id, created, { content: safe }, null)));
+          muted = true;
+          return;
+        }
         controller.enqueue(encoder.encode(sseChunk(id, created, { content: delta }, null)));
       };
 
