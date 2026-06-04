@@ -969,6 +969,21 @@ export async function answerQuestion(input: QaInput): Promise<QaOutput> {
 
       if (resp.stop_reason !== "tool_use") break;
 
+      // Voice keep-alive: a tool round-trip can push the next spoken word out
+      // to 5-8 seconds (think → tool → think → speak). Vapi treats long
+      // silence as a dead model and drops the call. Emit a short spoken
+      // bridge NOW so audio keeps flowing while the lookup runs.
+      if (input.voiceMode && input.onText) {
+        const fillers = [
+          "One moment, Sir.",
+          "Let me check, Sir.",
+          "Bear with me a moment, Sir.",
+          "Just pulling that up, Sir.",
+          "One second, Sir.",
+        ];
+        input.onText(fillers[Math.floor(Math.random() * fillers.length)] + " ");
+      }
+
       // Claude may emit MULTIPLE tool_use blocks in a single turn (parallel
       // tool calls). Anthropic requires a tool_result for EVERY tool_use in
       // the same following user message — miss one and the next API call
