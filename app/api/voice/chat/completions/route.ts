@@ -175,41 +175,44 @@ export async function POST(req: NextRequest) {
       controller.enqueue(encoder.encode(sseChunk(id, created, { role: "assistant", content: "" }, null)));
 
       let emittedAny = false;
-      // Mark's training makes him want to tail every answer with
-      // "Data as of <timestamp>" no matter what the prompt says. We strip it
-      // out of the audio stream as a hard guarantee. We buffer the last ~80
-      // chars, watch for the phrase to start, and once it does we stop
-      // emitting for the rest of the turn. Vapi never hears it.
-      let tail = "";
-      let muted = false;
-      const TRIGGERS = [
+      // Sentence-level filter: Mark's training will tail-pin "Data as of …"
+      // regardless of prompt. Buffer until we see a sentence boundary, then
+      // drop the sentence if it contains the timestamp-footer phrase. Cheap
+      // (~300ms extra latency on the last sentence) and bulletproof.
+      let buf = "";
+      const TIMESTAMP_PATTERNS = [
         /data\s+as\s+of/i,
-        /\bas\s+of[\s,]+(?:the|today|this|on)\b/i,
+        /\bas\s+of\s+(?:the\s+)?(?:\d|today|this|yesterday|that)/i,
+        /aest\b/i,
+        /\bbrisbane\s+time\b/i,
       ];
-      const onText = (delta: string) => {
-        if (!delta || muted) return;
+      const emit = (s: string) => {
+        if (!s) return;
         emittedAny = true;
-        tail = (tail + delta).slice(-120);
-        if (TRIGGERS.some((re) => re.test(tail))) {
-          // Find the start of the offending phrase in the current delta and
-          // emit only what came before it, then mute the rest of the turn.
-          let cut = delta.length;
-          for (const re of TRIGGERS) {
-            const m = re.exec(tail);
-            if (m) {
-              const tailIdx = m.index;
-              // Map tail index back into the current delta's slice.
-              const before = tail.length - delta.length;
-              const inDelta = Math.max(0, tailIdx - before);
-              if (inDelta < cut) cut = inDelta;
-            }
-          }
-          const safe = delta.slice(0, cut).replace(/[\s,.;:—-]+$/, "");
-          if (safe) controller.enqueue(encoder.encode(sseChunk(id, created, { content: safe }, null)));
-          muted = true;
-          return;
+        controller.enqueue(encoder.encode(sseChunk(id, created, { content: s }, null)));
+      };
+      const flushSentence = (sentence: string) => {
+        if (!sentence.trim()) return;
+        if (TIMESTAMP_PATTERNS.some((re) => re.test(sentence))) return; // drop
+        emit(sentence);
+      };
+      const onText = (delta: string) => {
+        if (!delta) return;
+        buf += delta;
+        // Emit complete sentences as they form; hold the trailing partial.
+        let m: RegExpExecArray | null;
+        const sentenceEnd = /[.!?](\s+|$)/g;
+        let lastIdx = 0;
+        while ((m = sentenceEnd.exec(buf)) !== null) {
+          const end = m.index + m[0].length;
+          flushSentence(buf.slice(lastIdx, end));
+          lastIdx = end;
         }
-        controller.enqueue(encoder.encode(sseChunk(id, created, { content: delta }, null)));
+        buf = buf.slice(lastIdx);
+      };
+      const flushFinal = () => {
+        if (buf.trim()) flushSentence(buf);
+        buf = "";
       };
 
       try {
@@ -225,6 +228,7 @@ export async function POST(req: NextRequest) {
       } catch (err) {
         console.error("[voice] askMark stream failed:", err);
       }
+      flushFinal();
 
       // Fallback: if nothing streamed (e.g. backend without token streaming, or
       // an early error), speak a graceful line so the call never goes silent.
