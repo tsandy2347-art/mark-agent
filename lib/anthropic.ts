@@ -37,6 +37,10 @@ import {
   LOOKUP_PAYROLL_DETAIL_TOOL,
   executeLookupPayrollDetailTool,
 } from "./mark/payroll-lookup-tool";
+import {
+  CHANGE_SPECIALIST_SETTING_TOOL,
+  executeChangeSpecialistSettingTool,
+} from "./mark/specialist-settings-tool";
 import { callHermesAsAnthropic } from "./mark/hermes-client";
 
 let _client: Anthropic | null = null;
@@ -66,6 +70,17 @@ Refer to your team by these names ("Rex has flagged…", "I'll have Dot remind y
 "Percy's data shows…"). It is YOUR team, you named them, and Tony knows them by
 these names. Don't drop back to the role name once you've used the personal name —
 treat them as people.
+
+ADJUSTING YOUR TEAM'S SETTINGS — you have authority. Each specialist has tunable
+knobs (thresholds, grace days, exposure limits). When Tony asks you to change one
+("have Monty chase invoices earlier", "drop the write-off threshold", "flag
+exposure above fifty thousand"), use the "change_specialist_setting" tool. Always
+read the request back in one sentence to confirm BEFORE calling the tool ("Just
+to confirm, Sir — Monty's write-off threshold from one-twenty days down to
+ninety?"). Speak the slug-to-name mapping naturally — Tony says "Monty", you call
+the tool with specialist "receivables". Currently only Monty has tunable knobs
+wired up; for the others, note the request plainly ("I'll log that for the team —
+Vera's controls aren't yet live for runtime changes") and DO NOT call the tool.
 
 HOW YOU "SEE" SOURCE SYSTEMS — read this carefully, it matters:
 
@@ -902,6 +917,7 @@ export async function answerQuestion(input: QaInput): Promise<QaOutput> {
       TRIGGER_SPECIALIST_RUN_TOOL,
       LOOKUP_MONTH_DETAIL_TOOL,
       LOOKUP_PAYROLL_DETAIL_TOOL,
+      CHANGE_SPECIALIST_SETTING_TOOL,
     ];
     if (draftToolsEnabled) {
       tools.push(CREATE_DRAFT_MANUAL_JOURNAL_TOOL, CREATE_PAYROLL_JOURNAL_TOOL);
@@ -1088,6 +1104,18 @@ export async function answerQuestion(input: QaInput): Promise<QaOutput> {
           const result = await executeLookupPayrollDetailTool(
             tu.input as { entity?: unknown; month?: unknown },
           );
+          toolResultBlocks.push({
+            type: "tool_result",
+            tool_use_id: tu.id,
+            content: JSON.stringify(result),
+            is_error: !result.ok,
+          });
+        } else if (tu.name === CHANGE_SPECIALIST_SETTING_TOOL.name) {
+          toolCallsFired++;
+          const result = await executeChangeSpecialistSettingTool({
+            input: tu.input as { specialist?: unknown; key?: unknown; value?: unknown },
+            triggeredBy: input.draftJournalTriggeredBy || "agent:mark",
+          });
           toolResultBlocks.push({
             type: "tool_result",
             tool_use_id: tu.id,

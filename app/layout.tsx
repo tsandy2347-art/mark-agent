@@ -22,6 +22,7 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
             <Link href="/" className="appbar-link">Today</Link>
             <Link href="/briefs" className="appbar-link">Briefs</Link>
             <Link href="/specialists" className="appbar-link">Specialists</Link>
+            <Link href="/specialists/settings" className="appbar-link">Settings</Link>
             <Link href="/imports" className="appbar-link">Imports</Link>
             <Link href="/financials" className="appbar-link">Profit history</Link>
             <Link href="/payroll" className="appbar-link">Payroll</Link>
