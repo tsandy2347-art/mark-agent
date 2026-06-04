@@ -831,7 +831,7 @@ export async function answerQuestion(input: QaInput): Promise<QaOutput> {
     const currentText =
       `Question from a team member: ${input.question}\n\n` +
       attachmentNote +
-      `Data as of: ${input.dataAsOf}\n\n` +
+      (input.voiceMode ? "" : `Data as of: ${input.dataAsOf}\n\n`) +
       (input.priorityData !== undefined && input.priorityData !== null
         ? `KEY FIGURES (authoritative — read these FIRST; they will not be truncated):\n` +
           `${JSON.stringify(input.priorityData)}\n\n`
