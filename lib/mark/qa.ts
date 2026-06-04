@@ -132,13 +132,19 @@ export async function askMark(input: AskInput): Promise<AskOutput> {
   const financialsBlock = financials.ok
     ? {
         note:
-          "Per-entity Profit & Loss from Xero (AUD). SC and CQ are SEPARATE legal " +
+          "Per-entity Profit & Loss (AUD). SC and CQ are SEPARATE legal " +
           "entities/taxpayers — 'consolidated' is a management sum only, NEVER " +
           "statutory. CRITICAL ARREARS CAVEAT: JBC bills most care in arrears, so " +
           "any month with partialMonthToDate=true (the current month) AND the single " +
           "most-recent completed month are UNDER-BOOKED on income and will show a " +
           "FALSE loss. Do NOT report a recent-month loss as real — explain the lag " +
-          "and cite the last FULLY-settled month as the trustworthy figure.",
+          "and cite the last FULLY-settled month as the trustworthy figure. " +
+          "EXPENSE/INCOME BREAKDOWN: each month carries a `lineItems` array of " +
+          "{section, account, amount} (section is income|costOfSales|otherIncome|" +
+          "operating). Use it to answer 'what were the expenses', 'biggest cost', " +
+          "'how much on wages' etc. — these come from uploaded Xero history, so " +
+          "you can break any month down WITHOUT needing a live lookup. Months " +
+          "without a lineItems array are live-pulled current months (totals only).",
         SC: financials.SC?.months ?? null,
         CQ: financials.CQ?.months ?? null,
         consolidated: financials.consolidated ?? null,

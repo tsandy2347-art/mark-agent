@@ -77,6 +77,9 @@ export async function POST(req: NextRequest) {
   // Upsert each parsed month. Re-uploading overwrites (restatements welcome).
   let written = 0;
   for (const m of parsed.months) {
+    // Prisma's Json input type wants a plain serializable value, not our typed
+    // interface array — round-trip through JSON to satisfy it.
+    const lineItemsJson = JSON.parse(JSON.stringify(m.lineItems));
     await prisma.monthlyFinancials.upsert({
       where: { entityCode_month: { entityCode, month: m.month } },
       create: {
@@ -88,6 +91,7 @@ export async function POST(req: NextRequest) {
         totalOtherIncome: m.totalOtherIncome,
         totalOperatingExpenses: m.totalOperatingExpenses,
         netProfit: m.netProfit,
+        lineItems: lineItemsJson,
         sourceFilename: name,
         uploadedBy,
       },
@@ -98,6 +102,7 @@ export async function POST(req: NextRequest) {
         totalOtherIncome: m.totalOtherIncome,
         totalOperatingExpenses: m.totalOperatingExpenses,
         netProfit: m.netProfit,
+        lineItems: lineItemsJson,
         sourceFilename: name,
         uploadedBy,
       },

@@ -309,6 +309,9 @@ model MonthlyFinancials {
   totalOtherIncome        Float?
   totalOperatingExpenses  Float?
   netProfit               Float?
+  // Per-account breakdown for the month: array of
+  // { section, account, amount } so Mark can answer "what were the expenses".
+  lineItems               Json?
   sourceFilename          String?  // the upload it came from, for audit
   uploadedBy              String   // basic-auth peer e.g. "user:tony"
   uploadedAt              DateTime @default(now())

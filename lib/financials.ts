@@ -14,6 +14,12 @@
 import { env } from "./env";
 import { prisma } from "./prisma";
 
+export interface PLLineItem {
+  section: "income" | "costOfSales" | "otherIncome" | "operating";
+  account: string;
+  amount: number;
+}
+
 export interface MonthPL {
   month: string; // "2026-04"
   from: string;
@@ -24,6 +30,9 @@ export interface MonthPL {
   grossProfit: number | null;
   totalOperatingExpenses: number | null;
   netProfit: number | null;
+  // Per-account breakdown (from uploaded history). Optional: the live poster
+  // pull doesn't provide it, only the DB-stored months do.
+  lineItems?: PLLineItem[];
 }
 
 export interface TenantFinancials {
@@ -69,14 +78,13 @@ function consolidate(sc?: TenantFinancials, cq?: TenantFinancials) {
 }
 
 // ── In-process cache ────────────────────────────────────────────────────────
-// The poster's /financials pull hits Xero live and takes ~9s. That's the single
-// biggest source of latency on a voice turn (Mark re-pulled 4 months of P&L on
-// EVERY spoken sentence). The P&L barely moves minute-to-minute, so we cache the
-// last good result per monthsBack for a short TTL and serve repeat turns
-// instantly. A failed pull is NOT cached (so we retry next turn). Cache lives in
-// module memory — shared across requests on a warm instance, which covers the
-// rapid-fire turns within a single voice call. Cold starts simply re-pull once.
-const FINANCIALS_TTL_MS = 5 * 60 * 1000; // 5 minutes
+// The poster's /financials pull hits Xero live and takes ~5-9s. The CURRENT
+// month is the only thing we ever pull live now (closed months come from the DB
+// history book), and today's running total barely moves through the day — so we
+// cache it for 6 hours. This nearly eliminates the live-pull wait on voice turns
+// AND keeps current-month Xero calls to a tiny handful per day. A failed pull is
+// NOT cached (so we retry next turn).
+const FINANCIALS_TTL_MS = 6 * 60 * 60 * 1000; // 6 hours
 type CacheEntry = { at: number; value: FinancialsResult };
 const financialsCache = new Map<number, CacheEntry>();
 
@@ -155,6 +163,7 @@ function dbRowToMonthPL(r: {
   grossProfit: number | null;
   totalOperatingExpenses: number | null;
   netProfit: number | null;
+  lineItems: unknown;
 }): MonthPL {
   return {
     month: r.month,
@@ -166,6 +175,7 @@ function dbRowToMonthPL(r: {
     grossProfit: r.grossProfit,
     totalOperatingExpenses: r.totalOperatingExpenses,
     netProfit: r.netProfit,
+    lineItems: Array.isArray(r.lineItems) ? (r.lineItems as PLLineItem[]) : undefined,
   };
 }
 

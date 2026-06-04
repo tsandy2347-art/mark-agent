@@ -30,6 +30,13 @@
 
 import * as XLSX from "xlsx";
 
+/** A single account line within a section, e.g. { section:"operating", account:"Wages and Salaries", amount:123456.78 } */
+export interface ParsedLineItem {
+  section: "income" | "costOfSales" | "otherIncome" | "operating";
+  account: string;
+  amount: number;
+}
+
 export interface ParsedMonth {
   month: string; // "YYYY-MM"
   label: string; // original header e.g. "Apr 2026"
@@ -39,6 +46,9 @@ export interface ParsedMonth {
   totalOtherIncome: number;
   totalOperatingExpenses: number;
   netProfit: number;
+  // Every account line for this month (zeros dropped), so Mark can break down
+  // income/expenses without going to Xero.
+  lineItems: ParsedLineItem[];
 }
 
 export interface ParseResult {
@@ -134,7 +144,18 @@ export function parseProfitAndLoss(bytes: Buffer, ext: string): ParseResult {
   // Initialise accumulators per month.
   type Acc = { income: number; cos: number; otherIncome: number; opex: number };
   const acc: Record<number, Acc> = {};
-  for (const mc of monthCols) acc[mc.col] = { income: 0, cos: 0, otherIncome: 0, opex: 0 };
+  const lines: Record<number, ParsedLineItem[]> = {};
+  for (const mc of monthCols) {
+    acc[mc.col] = { income: 0, cos: 0, otherIncome: 0, opex: 0 };
+    lines[mc.col] = [];
+  }
+
+  const SECTION_TO_LINE: Record<SectionField, ParsedLineItem["section"]> = {
+    totalIncome: "income",
+    totalCostOfSales: "costOfSales",
+    totalOtherIncome: "otherIncome",
+    totalOperatingExpenses: "operating",
+  };
 
   let section: SectionField | null = null;
 
@@ -154,7 +175,8 @@ export function parseProfitAndLoss(bytes: Buffer, ext: string): ParseResult {
     if (low.startsWith("total ") || low === "gross profit" || low === "net profit" || low === "surplus") {
       continue;
     }
-    // Leaf account row: add its value in each month column to the current section.
+    // Leaf account row: add its value in each month column to the current
+    // section AND record the per-account line item.
     if (!section) continue;
     for (const mc of monthCols) {
       const v = num(r[mc.col]);
@@ -164,6 +186,7 @@ export function parseProfitAndLoss(bytes: Buffer, ext: string): ParseResult {
       else if (section === "totalCostOfSales") a.cos += v;
       else if (section === "totalOtherIncome") a.otherIncome += v;
       else if (section === "totalOperatingExpenses") a.opex += v;
+      lines[mc.col].push({ section: SECTION_TO_LINE[section], account: label, amount: r2(v) });
     }
   }
 
@@ -184,6 +207,7 @@ export function parseProfitAndLoss(bytes: Buffer, ext: string): ParseResult {
       totalOtherIncome,
       totalOperatingExpenses,
       netProfit,
+      lineItems: lines[mc.col],
     };
   });
 
