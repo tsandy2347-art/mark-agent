@@ -89,13 +89,12 @@ export async function askMark(input: AskInput): Promise<AskOutput> {
     listOpenFindingsForQa({ includePeopleFlag: includeRestricted, limit: findingsLimit }),
     readLatestMetrics(),
     prisma.specialistRunStatus.findMany(),
-    // Memory: SKIP entirely on voice. The self-hosted Honcho instance responds
-    // in 2-4s — slower than any voice budget — so it timed out every single
-    // voice turn anyway (Mark never actually got memory, just paid the wait).
-    // Until Honcho is sped up, voice runs memory-free for snappy turns; browser
-    // chat still uses it (latency-tolerant). Re-enable by removing this gate.
-    input.sessionId && !isVoice
-      ? fetchMarkMemory({ sessionId: input.sessionId, userPeer })
+    // Memory on voice: re-enabled, but constrained. Runs in parallel with the
+    // data load (which is ~3.5s cold / ~0s warm), with a 2.8s budget — if it
+    // beats the data load it costs nothing; if it doesn't, we drop it and Mark
+    // stays memory-less for that turn rather than blocking his reply.
+    input.sessionId
+      ? fetchMarkMemory({ sessionId: input.sessionId, userPeer, timeoutMs: isVoice ? 2800 : undefined })
       : Promise.resolve({ resume: [], memoryBlock: null, disabled: true, errored: false }),
     // P&L per entity. DB-first: stored closed months (zero Xero calls) plus
     // ONLY the live current month (1 call/entity, cached). Lets Mark answer
@@ -248,11 +247,11 @@ export async function askMark(input: AskInput): Promise<AskOutput> {
     },
   });
 
-  // Persist the turn to Honcho. SKIP on voice — Honcho is too slow right now
-  // and the writes just time out (memory is disabled on voice anyway, see the
-  // fetch gate above). Browser chat still writes so its transcript builds.
-  if (input.sessionId && !isVoice) {
-    await Promise.all([
+  // Persist the turn to Honcho. On voice, fire-and-forget (don't await) so the
+  // write never blocks Mark hanging up. On browser chat, await for transcript
+  // integrity.
+  if (input.sessionId) {
+    const writes = Promise.all([
       postTurn({
         sessionId: input.sessionId,
         peerId: userPeer,
@@ -263,7 +262,8 @@ export async function askMark(input: AskInput): Promise<AskOutput> {
         peerId: env.HONCHO_MARK_PEER,
         content: answer,
       }),
-    ]);
+    ]).catch((e) => console.error("[mark] memory write failed:", e));
+    if (!isVoice) await writes;
   }
 
   return {
