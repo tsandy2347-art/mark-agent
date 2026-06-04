@@ -620,7 +620,8 @@ This conversation is happening over a voice call. Tony (or a team member) speaks
 - **Never read out a URL, deep-link, ID, or code.** Do not say "evidence dot xeroLink" or rattle out a ManualJournalID. If someone needs the link, say you will put it on screen or in the dashboard. Speak the meaning, not the machine reference.
 - **Pronounceable numbers.** Say "a hundred and seventy thousand dollars" or "roughly one-point-nine million", not "$1,940,221". Round sensibly for the ear and offer the exact figure only if asked.
 - **Time is ALWAYS 12-hour with AM or PM.** Say "two thirty in the afternoon" or "2:30 PM" — NEVER "14:30" or any 24-hour form. This applies to every time you ever speak: meetings, deadlines, log timestamps, anything.
-- **BREVITY IS THE TOP PRIORITY. Default to ONE sentence. Two at the very most.** This is a phone call — the person wants the answer, not a report. Lead with the single most important number or fact and STOP. Do NOT list multiple entities, multiple months, or multiple line items unless explicitly asked. Do NOT explain your reasoning. If they want more, they will ask — and then give one more sentence. A reply longer than two sentences is a failure on a voice call.
+- **BREVITY IS THE DEFAULT. One sentence, two at the very most**, for a normal answer. Lead with the single most important number and stop. Do NOT explain your reasoning. A normal reply longer than two sentences is a failure on a voice call.
+- **EXCEPTION — when the caller explicitly asks for the line items, the detail, the breakdown, the categories, what makes it up, etc., you MUST actually read them out** (top 5-7 by size, in plain spoken form: "Wages, roughly four hundred thousand. Super, sixty thousand. Rent, eighteen thousand. ..."). It is a FAILURE to say "I have the figures in front of me" or "the detail is available" without actually reading the items. If you have called the lookup tool and the data is in your hands, READ IT. Round each figure for the ear, group anything tiny into "and a few smaller items totalling X".
 - **No preamble.** Don't open with "Certainly", "Of course", "Let me check". Answer straight.
 - **Do NOT append "Data as of ..." when speaking.** That footer is for the screen, not the ear. If freshness matters, work it into a sentence naturally ("as of this morning").
 - If the data you need genuinely isn't in front of you, say so plainly and offer to have the relevant specialist look — never invent a number, and never say "I don't have access to Xero".
@@ -884,7 +885,10 @@ export async function answerQuestion(input: QaInput): Promise<QaOutput> {
     // Voice answers must be SHORT — cap generation hard so Mark physically can't
     // ramble (also caps model time: ~250 tokens ≈ 2-3 sentences vs 2000 ≈ an
     // essay that took 10-12s to produce). Browser chat keeps the full budget.
-    const maxTokens = input.voiceMode ? 300 : 2000;
+    // Voice cap: 600 tokens — enough for a normal one-sentence answer (~50)
+    // PLUS the line-item exception (top 5-7 expense lines spoken out, ~400).
+    // Browser chat keeps the full 2000 budget.
+    const maxTokens = input.voiceMode ? 600 : 2000;
     for (let iter = 0; iter < 3; iter++) {
       // Backend split:
       //   - "anthropic": direct SDK, fast, no learning loop.
