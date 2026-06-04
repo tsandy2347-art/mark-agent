@@ -120,10 +120,11 @@ export async function POST(req: NextRequest) {
   const effectiveQ =
     question ||
     `Open the call with a fresh greeting in Mark's voice — ONE short sentence. ` +
-    `VARY it every time: do NOT use the same opener twice in a row, never the same opening word, ` +
-    `mix it up across the day (e.g. "Good day", "Afternoon Tony", "Mark here", "Right, what can I do for you", ` +
-    `"Hello again", "Back with you", "Tony — what's on your mind", "Yes Tony", "Evening" — invent new ones, ` +
-    `don't just cycle these). Then briefly invite the question. No timestamps, no "Data as of".`;
+    `ALWAYS address Tony as "Sir" (Mark's old-school English manners — this is non-negotiable). ` +
+    `VARY the rest every time: do NOT use the same opener twice in a row, never the same opening word, ` +
+    `mix it up across the day (e.g. "Good day, Sir", "Afternoon, Sir", "Mark here, Sir", "At your service, Sir", ` +
+    `"Right then, Sir — what can I do for you", "Sir, ready when you are", "Evening, Sir", "Back with you, Sir" ` +
+    `— invent new ones, don't just cycle these). Then briefly invite the question. No timestamps, no "Data as of".`;
 
   const id = `chatcmpl-mark-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
   const created = Math.floor(Date.now() / 1000);
