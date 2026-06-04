@@ -196,6 +196,9 @@ export function restrictedUsernames(): string[] {
 export interface SpecialistDescriptor {
   agent: SpecialistAgent;
   label: string;
+  /** Mark's name for this specialist — the personal name to use in
+   *  conversation and on screen (e.g. "Rex" for reconciliation). */
+  name: string;
   url: string;
 }
 
@@ -220,12 +223,12 @@ export const SPECIALIST_AGENTS: SpecialistAgent[] = [
 
 export function specialists(): SpecialistDescriptor[] {
   return [
-    { agent: "reconciliation",  label: "Reconciliation",   url: env.SPECIALIST_RECONCILIATION_URL },
-    { agent: "controls-audit",  label: "Controls & Audit", url: env.SPECIALIST_CONTROLS_AUDIT_URL },
-    { agent: "payroll-labour",  label: "Payroll & Labour", url: env.SPECIALIST_PAYROLL_LABOUR_URL },
-    { agent: "payables",        label: "Payables",         url: env.SPECIALIST_PAYABLES_URL },
-    { agent: "revenue-claims",  label: "Revenue & Claims", url: env.SPECIALIST_REVENUE_CLAIMS_URL },
-    { agent: "receivables",     label: "Receivables",      url: env.SPECIALIST_RECEIVABLES_URL },
-    { agent: "tax-compliance",  label: "Tax & Compliance", url: env.SPECIALIST_TAX_COMPLIANCE_URL },
+    { agent: "reconciliation",  label: "Reconciliation",   name: "Rex",    url: env.SPECIALIST_RECONCILIATION_URL },
+    { agent: "controls-audit",  label: "Controls & Audit", name: "Flora",  url: env.SPECIALIST_CONTROLS_AUDIT_URL },
+    { agent: "payroll-labour",  label: "Payroll & Labour", name: "Percy",  url: env.SPECIALIST_PAYROLL_LABOUR_URL },
+    { agent: "payables",        label: "Payables",         name: "Archie", url: env.SPECIALIST_PAYABLES_URL },
+    { agent: "revenue-claims",  label: "Revenue & Claims", name: "Vera",   url: env.SPECIALIST_REVENUE_CLAIMS_URL },
+    { agent: "receivables",     label: "Receivables",      name: "Monty",  url: env.SPECIALIST_RECEIVABLES_URL },
+    { agent: "tax-compliance",  label: "Tax & Compliance", name: "Dot",    url: env.SPECIALIST_TAX_COMPLIANCE_URL },
   ];
 }

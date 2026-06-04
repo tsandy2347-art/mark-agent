@@ -38,7 +38,7 @@ export default async function SpecialistsPage() {
               const effective = stale ? "stale" : (r?.lastRunStatus ?? "never");
               return (
                 <tr key={d.agent}>
-                  <td>{d.label}</td>
+                  <td>{d.name} — {d.label}</td>
                   <td>{d.url ? "yes" : <span className="dim">no</span>}</td>
                   <td>
                     <span className={`pill ${effective === "ok" || effective === "exceptions" ? "ok" : "critical"}`}>
