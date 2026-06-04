@@ -115,10 +115,15 @@ export async function POST(req: NextRequest) {
   const rawSession = body.call?.id || body.callId || `voice-${Date.now()}`;
   const sessionId = `mark-voice-${rawSession}`.replace(/[^A-Za-z0-9_-]/g, "").slice(0, 64);
 
-  // If Vapi sends an empty opener (it sometimes does on connect), greet briefly.
+  // If Vapi sends an empty opener (it does now, since firstMessage is empty and
+  // the brain generates each greeting), prompt for a fresh, varied opener.
   const effectiveQ =
     question ||
-    "Greet me briefly as Mark and ask what I'd like to know about the JBC finances. One sentence.";
+    `Open the call with a fresh greeting in Mark's voice — ONE short sentence. ` +
+    `VARY it every time: do NOT use the same opener twice in a row, never the same opening word, ` +
+    `mix it up across the day (e.g. "Good day", "Afternoon Tony", "Mark here", "Right, what can I do for you", ` +
+    `"Hello again", "Back with you", "Tony — what's on your mind", "Yes Tony", "Evening" — invent new ones, ` +
+    `don't just cycle these). Then briefly invite the question. No timestamps, no "Data as of".`;
 
   const id = `chatcmpl-mark-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
   const created = Math.floor(Date.now() / 1000);
