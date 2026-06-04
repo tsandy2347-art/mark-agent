@@ -854,19 +854,20 @@ export async function answerQuestion(input: QaInput): Promise<QaOutput> {
       : MARK_SYSTEM;
     // Inject the current Brisbane wall-clock time. CRITICAL: Sonnet's safety
     // reflex makes it say "I don't have a clock" by default. Override that
-    // directly — this is a system-provided fact, not a guess.
+    // directly — this is a system-provided fact, not a guess. We put this at
+    // the TOP of the system prompt so it lands before the financial-agent
+    // persona conditions Claude into "I only know finance data".
     const now = new Date();
-    const nowLine = input.voiceMode
-      ? `\n\n=== CURRENT TIME (system-provided, authoritative) ===\n` +
+    const nowHeader = input.voiceMode
+      ? `=== CURRENT WALL-CLOCK TIME (system-provided this turn — AUTHORITATIVE) ===\n` +
         `It is currently ${brisbaneVoice(now)} in Brisbane.\n` +
-        `When asked the time, day, or date, ANSWER WITH THIS — do NOT say ` +
-        `"I don't have a clock" or "I can't access real-time data". You DO ` +
-        `have the time; it is provided right above. Speak it in 12-hour format ` +
-        `(e.g. "it's about two thirty in the afternoon, Sir"). Never say "AEST" aloud.`
-      : `\n\n=== CURRENT TIME (system-provided, authoritative) ===\n` +
+        `If asked the time, day, or date, ANSWER WITH THIS. You DO have the clock.\n` +
+        `Do NOT say "I don't have a clock" or "check your phone" — that is wrong.\n` +
+        `Speak the time in 12-hour format (e.g. "it's about half past two in the afternoon, Sir").\n` +
+        `Never say "AEST" aloud.\n\n`
+      : `=== CURRENT WALL-CLOCK TIME (system-provided this turn — AUTHORITATIVE) ===\n` +
         `It is currently ${brisbane(now)} in Brisbane.\n` +
-        `When asked the time, day, or date, answer with this directly — ` +
-        `do NOT say you don't have access to real-time data. You do.`;
+        `If asked the time, day, or date, answer with this directly. You DO have the clock.\n\n`;
     // On voice, surgically remove the two persona lines that mandate the
     // "Data as of <timestamp>" footer. Belt-and-braces — the voice overlay
     // also tells him not to say it.
@@ -875,7 +876,7 @@ export async function answerQuestion(input: QaInput): Promise<QaOutput> {
           .replace(/Always end with "Data as of <Brisbane timestamp>"\./g, "")
           .replace(/- The "Data as of" footer is the only thing that's required on every turn —\s*\n\s*everything else should be NEW content responsive to the latest question\./g, "")
       : baseSystem;
-    const systemPrompt = (input.voiceMode ? `${voiceCleaned}${MARK_VOICE_OVERLAY}` : baseSystem) + nowLine;
+    const systemPrompt = nowHeader + (input.voiceMode ? `${voiceCleaned}${MARK_VOICE_OVERLAY}` : baseSystem);
 
     // Tool wiring:
     //   - The two journal-writing tools are gated behind an explicit
