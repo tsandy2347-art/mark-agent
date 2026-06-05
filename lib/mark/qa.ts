@@ -80,7 +80,11 @@ export async function askMark(input: AskInput): Promise<AskOutput> {
   // Load a lighter slice for voice (fewer findings, shorter bodies) so the
   // pre-model data fetch + prompt stay small. Browser chat keeps the full depth.
   const isVoice = Boolean(input.voiceMode);
-  const findingsLimit = isVoice ? 60 : 400;
+  const findingsLimit = isVoice ? 100 : 400;
+  // Per-agent cap = total / 7 specialists (rounded up), so a single noisy
+  // specialist (e.g. Monty's hundreds of overdue invoices) can't crowd Dot,
+  // Vera, Flora et al. out of Mark's view entirely.
+  const perAgentCap = isVoice ? 15 : 80;
   const findingsBodyCap = isVoice ? 600 : 2500;
 
   const __td = Date.now();
@@ -90,7 +94,7 @@ export async function askMark(input: AskInput): Promise<AskOutput> {
     // because the legacy specialist /api/findings poll cycle has been
     // decommissioned in Phase 2 of the consolidation plan. Skills write
     // direct, Mark reads direct, no middle layer.
-    listOpenFindingsForQa({ includePeopleFlag: includeRestricted, limit: findingsLimit }),
+    listOpenFindingsForQa({ includePeopleFlag: includeRestricted, limit: findingsLimit, perAgentCap }),
     readLatestMetrics(),
     prisma.specialistRunStatus.findMany(),
     // Memory on voice: re-enabled, but constrained. Runs in parallel with the
