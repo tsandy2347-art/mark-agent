@@ -490,8 +490,16 @@ export async function synthesiseBrief(input: SynthesiseBriefInput): Promise<Synt
   }
 
   try {
+    // Per-task model routing: monthly briefs are a once-a-month deep
+    // synthesis where Opus's reasoning earns its keep. Daily/weekly/restricted
+    // stay on the default (sonnet) — high-volume, sonnet is fine. Override via
+    // MARK_BRIEF_MONTHLY_MODEL if a future tier is preferred.
+    const isMonthly = input.briefType === "monthly";
+    const briefModel = isMonthly
+      ? (env.MARK_BRIEF_MONTHLY_MODEL || "claude-opus-4-7")
+      : env.ANTHROPIC_MODEL;
     const resp = await c.messages.create({
-      model: env.ANTHROPIC_MODEL,
+      model: briefModel,
       max_tokens: 1800,
       system: MARK_SYSTEM,
       messages: [{ role: "user", content: userMsg }],

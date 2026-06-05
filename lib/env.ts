@@ -95,6 +95,12 @@ const schema = z.object({
   MARK_WEEKLY_REPORT_DAY: z.coerce.number().int().min(1).max(7).default(1),
   /** Day-of-month the monthly pack is sent. Default 3rd (gives close some air). */
   MARK_MONTHLY_PACK_DAY: z.coerce.number().int().min(1).max(28).default(3),
+  /** Per-task model override for the monthly brief synthesis. Deep monthly
+   *  packs are once a month + low volume; Opus's reasoning earns its keep
+   *  there. Daily/weekly/restricted briefs stay on ANTHROPIC_MODEL (sonnet)
+   *  for volume cost reasons. Default opus-4-7; set blank to disable the
+   *  override and let monthly briefs run on the default model too. */
+  MARK_BRIEF_MONTHLY_MODEL: z.string().default("claude-opus-4-7"),
   /** A specialist not run successfully inside this window is "stale" — that
    *  staleness becomes its own brief item. */
   MARK_SPECIALIST_STALE_HOURS: z.coerce.number().int().default(36),
