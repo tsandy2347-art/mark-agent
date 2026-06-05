@@ -1,17 +1,19 @@
-// Function A — orchestration. Mark pulls FinanceFinding lists from each
-// specialist's /api/findings endpoint, upserts them into IngestedFinding, and
-// updates SpecialistRunStatus.
+// Specialist health sync — replaces the legacy HTTP poll.
 //
-// Read-mostly: this module only writes Mark's own orchestration tables. It
-// never POSTs anything back to a specialist or to a source system.
+// The seven specialists used to be standalone Railway services Mark polled
+// every 30 minutes at `${url}/api/findings`. Those services were torn down in
+// the consolidation; the live data path is now: detector cron on the brain
+// writes `findings` + `audit_runs` to the shared findings DB, and Mark reads
+// directly from that DB.
 //
-// Fail-quiet: per-specialist errors do NOT throw out of pollSpecialist — they
-// are recorded as lastRunStatus="failed" with lastError set, so the next brief
-// surfaces the silence as its own item (spec: "a blind spot is a finding").
+// So Mark's idea of "is the fleet alive?" should also come from `audit_runs`.
+// This module sweeps audit_runs once and copies the latest run-per-agent into
+// `SpecialistRunStatus`, the table the dashboard + briefs already read. No
+// HTTP calls anywhere — just a DB-to-DB sync.
 
 import { prisma } from "../prisma";
-import { env, type SpecialistAgent, type SpecialistDescriptor, specialists } from "../env";
-import type { FindingsEnvelope, FinanceFinding } from "../findings";
+import { env, type SpecialistAgent, specialists } from "../env";
+import { summariseByAgent } from "../hermes-findings";
 import { mockFindingsFor } from "./mock/fixtures";
 
 export interface PollResult {
@@ -22,158 +24,15 @@ export interface PollResult {
   error?: string;
 }
 
-const POLL_TIMEOUT_MS = 20_000;
-
-export async function pollSpecialist(desc: SpecialistDescriptor): Promise<PollResult> {
-  // Mock mode short-circuit — exercise the whole pipeline without any
-  // specialist being up. See lib/mark/mock/fixtures.ts.
-  if (env.MARK_MOCK) {
-    const findings = mockFindingsFor(desc.agent);
-    await upsertFindings(desc.agent, findings);
-    const open = findings.filter((f) => !f.resolved).length;
-    const status: PollResult["status"] = open > 0 ? "exceptions" : "ok";
-    await persistStatus(desc.agent, { lastRunAt: new Date(), lastRunStatus: status, lastError: null, exceptionsOpen: open });
-    return { agent: desc.agent, ok: true, count: findings.length, status };
-  }
-
-  if (!desc.url) {
-    const err = `no SPECIALIST_${desc.agent.replace(/-/g, "_").toUpperCase()}_URL configured`;
-    await persistStatus(desc.agent, { lastRunStatus: "failed", lastError: err });
-    return { agent: desc.agent, ok: false, count: 0, status: "failed", error: err };
-  }
-
-  if (!env.HUB_API_KEY) {
-    const err = "HUB_API_KEY not set — cannot authenticate to specialist";
-    await persistStatus(desc.agent, { lastRunStatus: "failed", lastError: err });
-    return { agent: desc.agent, ok: false, count: 0, status: "failed", error: err };
-  }
-
-  const url = buildFindingsUrl(desc.url);
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), POLL_TIMEOUT_MS);
-
-  try {
-    const res = await fetch(url, {
-      method: "GET",
-      headers: {
-        Authorization: `Bearer ${env.HUB_API_KEY}`,
-        Accept: "application/json",
-      },
-      signal: controller.signal,
-    });
-    if (!res.ok) {
-      const body = await res.text().catch(() => "");
-      const err = `HTTP ${res.status} ${res.statusText}: ${body.slice(0, 300)}`;
-      await persistStatus(desc.agent, { lastRunStatus: "failed", lastError: err });
-      return { agent: desc.agent, ok: false, count: 0, status: "failed", error: err };
-    }
-    const json = (await res.json()) as Partial<FindingsEnvelope>;
-    const findings = Array.isArray(json.findings) ? json.findings : [];
-    await upsertFindings(desc.agent, findings);
-    const open = findings.filter((f) => !f.resolved).length;
-    const status: PollResult["status"] = open > 0 ? "exceptions" : "ok";
-    await persistStatus(desc.agent, { lastRunAt: new Date(), lastRunStatus: status, lastError: null, exceptionsOpen: open });
-    return { agent: desc.agent, ok: true, count: findings.length, status };
-  } catch (e) {
-    const err = e instanceof Error ? e.message : String(e);
-    await persistStatus(desc.agent, { lastRunStatus: "failed", lastError: err });
-    return { agent: desc.agent, ok: false, count: 0, status: "failed", error: err };
-  } finally {
-    clearTimeout(timer);
-  }
-}
-
-function buildFindingsUrl(base: string): string {
-  // Mark always asks for non-people, non-resolved by default. Restricted brief
-  // assembly uses a separate poll path (pollSpecialistRestricted) if/when we
-  // need it; v1 keeps it simple and pulls everything via include_people=1
-  // when the caller is restricted-mode.
-  const trimmed = base.replace(/\/+$/, "");
-  // Mark wants people findings too — he is allowed to read them; the routing
-  // guard at the email layer is what keeps them off non-restricted briefs.
-  // Without include_people=1 he would never see them on poll.
-  return `${trimmed}/api/findings?include_people=1`;
-}
-
-interface StatusUpdate {
-  lastRunAt?: Date;
-  lastRunStatus: string;
-  lastError?: string | null;
-  exceptionsOpen?: number;
-}
-
-async function persistStatus(agent: SpecialistAgent, update: StatusUpdate): Promise<void> {
-  await prisma.specialistRunStatus.upsert({
-    where: { agent },
-    create: {
-      agent,
-      lastRunAt: update.lastRunAt ?? null,
-      lastRunStatus: update.lastRunStatus,
-      lastError: update.lastError ?? null,
-      exceptionsOpen: update.exceptionsOpen ?? 0,
-    },
-    update: {
-      ...(update.lastRunAt ? { lastRunAt: update.lastRunAt } : {}),
-      lastRunStatus: update.lastRunStatus,
-      lastError: update.lastError === undefined ? undefined : update.lastError,
-      ...(update.exceptionsOpen !== undefined ? { exceptionsOpen: update.exceptionsOpen } : {}),
-    },
-  });
-}
-
-async function upsertFindings(agent: SpecialistAgent, findings: FinanceFinding[]): Promise<void> {
-  for (const f of findings) {
-    if (!f.id) continue;
-    const at = parseAt(f.at);
-    await prisma.ingestedFinding.upsert({
-      where: {
-        specialistAgent_specialistFindingId: {
-          specialistAgent: agent,
-          specialistFindingId: f.id,
-        },
-      },
-      create: {
-        specialistAgent: agent,
-        specialistFindingId: f.id,
-        at,
-        severity: f.severity,
-        isPeopleFlag: Boolean(f.isPeopleFlag),
-        entityCode: f.entityCode || "BOTH",
-        domain: f.domain || "",
-        detector: f.detector || "",
-        title: f.title || "(no title)",
-        body: f.body || "",
-        explanation: f.explanation ?? null,
-        evidenceJson: (f.evidence ?? {}) as unknown as object,
-        amount: f.amount == null ? null : (f.amount as unknown as number),
-        suggestedAction: String(f.suggestedAction ?? "review"),
-        resolved: Boolean(f.resolved),
-      },
-      update: {
-        // Resolution + severity may change upstream; sync them.
-        at,
-        severity: f.severity,
-        isPeopleFlag: Boolean(f.isPeopleFlag),
-        entityCode: f.entityCode || "BOTH",
-        domain: f.domain || "",
-        detector: f.detector || "",
-        title: f.title || "(no title)",
-        body: f.body || "",
-        explanation: f.explanation ?? null,
-        evidenceJson: (f.evidence ?? {}) as unknown as object,
-        amount: f.amount == null ? null : (f.amount as unknown as number),
-        suggestedAction: String(f.suggestedAction ?? "review"),
-        resolved: Boolean(f.resolved),
-      },
-    });
-  }
-}
-
-function parseAt(s: string): Date {
-  const d = new Date(s);
-  if (Number.isNaN(d.getTime())) return new Date();
-  return d;
-}
+const KNOWN_AGENTS: SpecialistAgent[] = [
+  "reconciliation",
+  "controls-audit",
+  "payroll-labour",
+  "payables",
+  "revenue-claims",
+  "receivables",
+  "tax-compliance",
+];
 
 /** Helper used by the daily brief — agents whose lastRunAt is older than
  *  MARK_SPECIALIST_STALE_HOURS, OR have never run, are silent and their
@@ -184,14 +43,117 @@ export function isStale(lastRunAt: Date | null, now: Date = new Date()): boolean
   return ageMs > env.MARK_SPECIALIST_STALE_HOURS * 3600 * 1000;
 }
 
-/** Poll every specialist Mark knows about, sequentially (we don't want to
- *  hammer all 7 at once and we don't need the speed). Returns the per-agent
- *  result list. Errors per-agent are absorbed; the function itself never
- *  throws. */
+/**
+ * Sweep every specialist Mark knows about. For each one, read the latest
+ * audit_runs row from the shared findings DB and mirror it into
+ * SpecialistRunStatus. No HTTP, no `${url}/api/findings`, no specialist URLs
+ * — just the DB the detectors write to.
+ *
+ * Errors per-agent are absorbed; the function itself never throws.
+ */
 export async function pollAll(): Promise<PollResult[]> {
+  // Mock mode short-circuit — exercise the pipeline without any DB read.
+  if (env.MARK_MOCK) {
+    const out: PollResult[] = [];
+    for (const desc of specialists()) {
+      const findings = mockFindingsFor(desc.agent);
+      const open = findings.filter((f) => !f.resolved).length;
+      const status: PollResult["status"] = open > 0 ? "exceptions" : "ok";
+      await persistStatus(desc.agent, {
+        lastRunAt: new Date(),
+        lastRunStatus: status,
+        lastError: null,
+        exceptionsOpen: open,
+      });
+      out.push({ agent: desc.agent, ok: true, count: findings.length, status });
+    }
+    return out;
+  }
+
+  let summary: Awaited<ReturnType<typeof summariseByAgent>>;
+  try {
+    summary = await summariseByAgent();
+  } catch (e) {
+    // Findings DB unreachable: mark every agent as failed so the brief surfaces
+    // the silence, but don't crash the cron.
+    const err = e instanceof Error ? e.message : String(e);
+    const out: PollResult[] = [];
+    for (const agent of KNOWN_AGENTS) {
+      await persistStatus(agent, { lastRunStatus: "failed", lastError: `findings DB read failed: ${err}` });
+      out.push({ agent, ok: false, count: 0, status: "failed", error: err });
+    }
+    return out;
+  }
+
+  const byAgent = new Map(summary.map((s) => [s.sourceAgent, s]));
   const out: PollResult[] = [];
-  for (const desc of specialists()) {
-    out.push(await pollSpecialist(desc));
+
+  for (const agent of KNOWN_AGENTS) {
+    const row = byAgent.get(agent);
+    if (!row || !row.lastRunAt) {
+      // Detector has never written to audit_runs. Treat as "never" so the
+      // briefs flag it as a blind spot.
+      await persistStatus(agent, { lastRunStatus: "never", lastError: null, exceptionsOpen: 0 });
+      out.push({ agent, ok: false, count: 0, status: "never" });
+      continue;
+    }
+
+    const stale = isStale(row.lastRunAt);
+    // Translate the brain's run.status into Mark's vocabulary.
+    let status: PollResult["status"];
+    if (stale) {
+      status = "stale";
+    } else if (row.lastStatus === "ok") {
+      status = "ok";
+    } else if (row.lastStatus === "exceptions") {
+      status = "exceptions";
+    } else if (row.lastStatus === "failed") {
+      status = "failed";
+    } else {
+      // Anything else (running, partial, NULL) — treat as exceptions so it
+      // still shows in the dashboard with the real open-count.
+      status = row.openCount > 0 ? "exceptions" : "ok";
+    }
+
+    await persistStatus(agent, {
+      lastRunAt: row.lastRunAt,
+      lastRunStatus: status,
+      lastError: null,
+      exceptionsOpen: row.openCount,
+    });
+    out.push({
+      agent,
+      ok: status !== "failed",
+      count: row.openCount,
+      status,
+    });
   }
   return out;
+}
+
+async function persistStatus(
+  agent: SpecialistAgent,
+  patch: {
+    lastRunAt?: Date;
+    lastRunStatus?: "ok" | "exceptions" | "failed" | "stale" | "never";
+    lastError?: string | null;
+    exceptionsOpen?: number;
+  },
+): Promise<void> {
+  await prisma.specialistRunStatus.upsert({
+    where: { agent },
+    create: {
+      agent,
+      lastRunAt: patch.lastRunAt ?? null,
+      lastRunStatus: patch.lastRunStatus ?? "never",
+      lastError: patch.lastError ?? null,
+      exceptionsOpen: patch.exceptionsOpen ?? 0,
+    },
+    update: {
+      ...(patch.lastRunAt !== undefined ? { lastRunAt: patch.lastRunAt } : {}),
+      ...(patch.lastRunStatus !== undefined ? { lastRunStatus: patch.lastRunStatus } : {}),
+      ...(patch.lastError !== undefined ? { lastError: patch.lastError } : {}),
+      ...(patch.exceptionsOpen !== undefined ? { exceptionsOpen: patch.exceptionsOpen } : {}),
+    },
+  });
 }
