@@ -26,6 +26,10 @@ interface AskInput {
    *  Defaults to false. The route layer is responsible for setting this only
    *  when the requesting user is in MARK_RESTRICTED_USERNAMES. */
   includeRestricted?: boolean;
+  /** When true, Mark's mutating tools (e.g. change_specialist_setting) are
+   *  dropped from this turn's toolset. Set by the route layer for users in
+   *  MARK_VIEWONLY_USERNAMES (Nicole, Lindsay). Defaults to false. */
+  viewOnly?: boolean;
   /** Optional files the user uploaded — PDFs, images (screenshots), or
    *  spreadsheets. Forwarded to Anthropic appropriately for each type.
    *  All attachments bind to the first user message of the conversation so
@@ -228,6 +232,7 @@ export async function askMark(input: AskInput): Promise<AskOutput> {
     // Identity that flows to recon as x-triggered-by when Mark calls the
     // create_draft_manual_journal tool. Always populated — "user:nicole" etc.
     draftJournalTriggeredBy: `user:${userPeer}`,
+    viewOnly: Boolean(input.viewOnly),
   });
 
   // Audit log: if the user attached files, record the filenames in the

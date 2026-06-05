@@ -23,6 +23,10 @@ const schema = z.object({
    *  Default per spec section 2.5 + report routing: Tony + Lindsay (people) +
    *  Nicole (pay). Mark gates the route by Basic-auth username. */
   MARK_RESTRICTED_USERNAMES: z.string().default("tony,lindsay,nicole"),
+  /** Usernames that get a read-only view: dashboard pages render, but the
+   *  mutating pages (Settings, Payroll journal) are hidden + server-side
+   *  refused. Tony stays full; Nicole defaults to view-only. */
+  MARK_VIEWONLY_USERNAMES: z.string().default("nicole,lindsay"),
 
   // ── Specialist endpoints (one base URL per agent) ────────────────
   // Mark calls ${URL}/api/findings with Authorization: Bearer ${HUB_API_KEY}.

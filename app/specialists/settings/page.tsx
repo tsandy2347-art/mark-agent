@@ -6,10 +6,24 @@
 import { brisbane } from "@/lib/time";
 import { listSettings, SPECIALIST_KNOBS } from "@/lib/specialist-settings";
 import { specialists } from "@/lib/env";
+import { currentUsername, isViewOnly } from "@/lib/permissions";
 
 export const dynamic = "force-dynamic";
 
 export default async function SpecialistSettingsPage() {
+  const me = await currentUsername();
+  if (isViewOnly(me)) {
+    return (
+      <main className="container">
+        <h1>Specialist settings</h1>
+        <p className="muted">
+          You&apos;re on a view-only login. Settings are read/write for Tony only —
+          if you need a knob changed, ask Tony and he&apos;ll update it (or tell
+          Mark by voice).
+        </p>
+      </main>
+    );
+  }
   const all = await listSettings();
   const byPair = new Map(all.map((s) => [`${s.specialist}|${s.key}`, s]));
   const desc = specialists();

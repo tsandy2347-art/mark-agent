@@ -72,6 +72,15 @@ function runParser(summaryPath: string, dataPath: string, detailPath: string): P
 }
 
 export async function POST(req: NextRequest) {
+  // View-only users (Nicole, Lindsay) cannot upload pay runs. Tony only.
+  const { currentUsername, isViewOnly } = await import("@/lib/permissions");
+  const me = await currentUsername();
+  if (isViewOnly(me)) {
+    return NextResponse.json(
+      { ok: false, error: "view-only login — payroll-journal upload is Tony-only" },
+      { status: 403 },
+    );
+  }
   const ct = req.headers.get("content-type") ?? "";
   if (!ct.startsWith("multipart/form-data")) {
     return fail("Content-Type must be multipart/form-data");

@@ -253,10 +253,13 @@ export async function POST(req: NextRequest) {
 
   const me = (await currentUsername()) ?? "anonymous";
   const canSeeRestricted = restrictedUsernames().includes(me);
+  const { isViewOnly } = await import("@/lib/permissions");
+  const viewOnly = isViewOnly(me);
   const out = await askMark({
     askedBy: me,
     question: effectiveQ,
     includeRestricted: canSeeRestricted,
+    viewOnly,
     attachments,
     history,
     sessionId,

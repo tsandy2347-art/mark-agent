@@ -617,6 +617,10 @@ interface QaInput {
    *  Tool is offered only when this is set — Q&A-only callers leave it
    *  undefined and Mark can't act. */
   draftJournalTriggeredBy?: string;
+  /** When true, the caller is a view-only user (Nicole, Lindsay). Mutating
+   *  tools — currently change_specialist_setting — are dropped from Mark's
+   *  available toolset for this turn. He can still answer questions. */
+  viewOnly?: boolean;
   /** When true, Mark's reply is bound for text-to-speech (Vapi voice call).
    *  A spoken-style overlay is appended to the system prompt: no markdown,
    *  no URLs/deep-links read aloud, pronounceable numbers, 1-3 sentences,
@@ -917,8 +921,11 @@ export async function answerQuestion(input: QaInput): Promise<QaOutput> {
       TRIGGER_SPECIALIST_RUN_TOOL,
       LOOKUP_MONTH_DETAIL_TOOL,
       LOOKUP_PAYROLL_DETAIL_TOOL,
-      CHANGE_SPECIALIST_SETTING_TOOL,
     ];
+    // Mutating tools — only offered to non-view-only callers.
+    if (!input.viewOnly) {
+      tools.push(CHANGE_SPECIALIST_SETTING_TOOL);
+    }
     if (draftToolsEnabled) {
       tools.push(CREATE_DRAFT_MANUAL_JOURNAL_TOOL, CREATE_PAYROLL_JOURNAL_TOOL);
     }
