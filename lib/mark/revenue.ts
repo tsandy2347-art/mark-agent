@@ -8,8 +8,7 @@ import { prisma } from "../prisma";
 
 export const STREAMS = [
   "NDIA",
-  "SAH",
-  "HCP",         // retired but appears in historic data — show separately, don't bucket as Other
+  "SAH",         // includes legacy HCP (Home Care Package) — same program, renamed
   "Private",
   "Brokerage",
   "SIL",
@@ -22,9 +21,9 @@ export type Stream = (typeof STREAMS)[number];
 // goes to "Other" (still surfaced — never silently dropped).
 function streamOf(accountName: string): Stream | "Other" {
   const n = accountName.toLowerCase();
-  // HCP must be checked BEFORE generic SAH/NDIS — "Home Care Package" is
-  // distinct from SAH.
-  if (n.includes("hcp") || n.includes("home care package")) return "HCP";
+  // HCP = legacy Home Care Package; folded into SAH (Support at Home) — same
+  // program, just renamed under the reform. Tony's rule.
+  if (n.includes("hcp") || n.includes("home care package")) return "SAH";
   if (n.includes("ndis") || n.includes("ndia")) return "NDIA";
   if (n.includes("sah") || n.includes("support at home")) return "SAH";
   if (n.includes("dva")) return "DVA";
@@ -59,7 +58,7 @@ export interface RevenueSummary {
 }
 
 function emptyByStream(): Record<Stream | "Other", number> {
-  return { NDIA: 0, SAH: 0, HCP: 0, Private: 0, Brokerage: 0, SIL: 0, "Plan Mgmt": 0, DVA: 0, Other: 0 };
+  return { NDIA: 0, SAH: 0, Private: 0, Brokerage: 0, SIL: 0, "Plan Mgmt": 0, DVA: 0, Other: 0 };
 }
 
 function decMonth(ym: string, by = 1): string {
