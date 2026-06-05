@@ -119,14 +119,25 @@ export async function POST(req: NextRequest) {
 
   // If Vapi sends an empty opener (it does now, since firstMessage is empty and
   // the brain generates each greeting), prompt for a fresh, varied opener.
+  // Variety is critical — Tony complained about Mark repeating "Glad to have
+  // you on the line, Sir" every call. Banned phrases listed below.
+  const hourBNE = new Date(Date.now() + 10 * 3600 * 1000).getUTCHours();
+  const tod =
+    hourBNE < 12 ? "morning" :
+    hourBNE < 17 ? "afternoon" :
+    "evening";
   const effectiveQ =
     question ||
-    `Open the call with a fresh greeting in Mark's voice — ONE short sentence. ` +
-    `ALWAYS address Tony as "Sir" (Mark's old-school English manners — this is non-negotiable). ` +
-    `VARY the rest every time: do NOT use the same opener twice in a row, never the same opening word, ` +
-    `mix it up across the day (e.g. "Good day, Sir", "Afternoon, Sir", "Mark here, Sir", "At your service, Sir", ` +
-    `"Right then, Sir — what can I do for you", "Sir, ready when you are", "Evening, Sir", "Back with you, Sir" ` +
-    `— invent new ones, don't just cycle these). Then briefly invite the question. No timestamps, no "Data as of".`;
+    `Open the call with ONE short, fresh greeting in Mark's voice. ` +
+    `Brisbane time of day right now is ${tod} — pitch the greeting to suit. ` +
+    `DO NOT use "Sir" in this opener — Tony has asked for less of it. ` +
+    `BANNED phrases (never use, not even reworded): "Glad to have you on the line", ` +
+    `"At your service", "How may I be of service", "Pleasure to hear from you". ` +
+    `Aim for natural, varied, sometimes terse — examples of the tone (do not copy verbatim): ` +
+    `"${tod === "morning" ? "Morning, Tony" : tod === "afternoon" ? "Afternoon, Tony" : "Evening, Tony"} — what's on your mind", ` +
+    `"Mark here — go ahead", "Ready when you are", "Right — what do you need", ` +
+    `"You've got me — fire away". Invent your own; never repeat the previous opener you used. ` +
+    `No timestamps, no "Data as of".`;
 
   const id = `chatcmpl-mark-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
   const created = Math.floor(Date.now() / 1000);
