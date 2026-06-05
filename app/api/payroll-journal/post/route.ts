@@ -16,15 +16,6 @@ export const dynamic = "force-dynamic";
 export const maxDuration = 200;
 
 export async function POST(req: NextRequest) {
-  // View-only users (Nicole, Lindsay) cannot post DRAFT journals into Xero.
-  const { currentUsername, isViewOnly } = await import("@/lib/permissions");
-  const me = await currentUsername();
-  if (isViewOnly(me)) {
-    return NextResponse.json(
-      { ok: false, error: "view-only login — posting payroll DRAFTs is Tony-only" },
-      { status: 403 },
-    );
-  }
   if (!env.PAYROLL_POSTER_URL || !env.PAYROLL_POSTER_API_KEY) {
     return NextResponse.json(
       { ok: false, error: "payroll-poster not configured (PAYROLL_POSTER_URL / PAYROLL_POSTER_API_KEY)" },

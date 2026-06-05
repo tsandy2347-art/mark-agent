@@ -35,9 +35,7 @@ export default async function RootLayout({ children }: { children: React.ReactNo
             <Link href="/goals" className="appbar-link">Goals</Link>
             <Link href="/reports/profit" className="appbar-link">Reports</Link>
             <Link href="/cash-forecast" className="appbar-link">Cash forecast</Link>
-            {!viewOnly && (
-              <Link href="/payroll-journal" className="appbar-link">Payroll journal</Link>
-            )}
+            <Link href="/payroll-journal" className="appbar-link">Payroll journal</Link>
             <Link href="/qa" className="appbar-link">Ask Mark</Link>
             <Link href="/restricted" className="appbar-link">Restricted</Link>
           </nav>
