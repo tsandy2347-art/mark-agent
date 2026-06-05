@@ -15,7 +15,7 @@ import { brisbane } from "../time";
 import { answerQuestion, type QaAttachment, type QaHistoryTurn } from "../anthropic";
 import { env } from "../env";
 import { fetchMarkMemory, formatMemoryAddendum, postTurn } from "../honcho";
-import { listOpenFindingsForQa } from "../hermes-findings";
+import { listOpenFindingsForQa, rollupOpenFindings } from "../hermes-findings";
 import { readLatestMetrics } from "./goals";
 import { getFinancialsForQa } from "../financials";
 
@@ -88,13 +88,14 @@ export async function askMark(input: AskInput): Promise<AskOutput> {
   const findingsBodyCap = isVoice ? 600 : 2500;
 
   const __td = Date.now();
-  const [findings, metrics, statuses, memory, financials, payrollMonths] = await Promise.all([
+  const [findings, rollup, metrics, statuses, memory, financials, payrollMonths] = await Promise.all([
     // Pull directly from the shared hermes-jbc findings DB — the table every
     // Hermes skill writes to. We bypass Mark's local IngestedFinding mirror
     // because the legacy specialist /api/findings poll cycle has been
     // decommissioned in Phase 2 of the consolidation plan. Skills write
     // direct, Mark reads direct, no middle layer.
     listOpenFindingsForQa({ includePeopleFlag: includeRestricted, limit: findingsLimit, perAgentCap }),
+    rollupOpenFindings({ includePeopleFlag: includeRestricted }),
     readLatestMetrics(),
     prisma.specialistRunStatus.findMany(),
     // Memory on voice: re-enabled, but constrained. Runs in parallel with the
@@ -227,7 +228,15 @@ export async function askMark(input: AskInput): Promise<AskOutput> {
     question: input.question,
     dataAsOf,
     data,
-    priorityData: { financials: financialsBlock, payroll: payrollBlock },
+    priorityData: {
+      financials: financialsBlock,
+      payroll: payrollBlock,
+      // Aggregate roll-up of EVERY open finding by detector × entity × severity
+      // with COUNT and SUM(amount). Lets Mark answer "how much is more than 90
+      // days overdue" / "what's our total exposure" with real totals, not just
+      // whatever 15-finding sample made it through the per-agent cap.
+      findingsRollup: rollup,
+    },
     attachments: input.attachments,
     history: input.history,
     memoryAddendum: formatMemoryAddendum(memory),

@@ -197,6 +197,49 @@ export interface HermesAgentSummary {
   totalRuns: number;
 }
 
+export interface HermesDetectorRollup {
+  sourceAgent: string;
+  detector: string;
+  entityCode: string | null;
+  severity: string;
+  count: number;
+  totalAmount: number | null;
+}
+
+/**
+ * Roll-up of every open finding by (source_agent, detector, entity, severity)
+ * with COUNT + SUM(amount). Tiny payload (a few dozen rows max), so safe to
+ * stuff into Mark's priorityData on every turn. Lets him answer aggregate
+ * questions like "how much is more than 90 days overdue" with the real total,
+ * not just whatever sample of 15 individual findings made it through the
+ * per-agent cap.
+ */
+export async function rollupOpenFindings(args: {
+  includePeopleFlag: boolean;
+}): Promise<HermesDetectorRollup[]> {
+  if (!hermesConfigured()) return [];
+  const whereParts: string[] = ["resolved=false"];
+  if (!args.includePeopleFlag) whereParts.push("is_people_flag=false");
+  const where = whereParts.join(" AND ");
+  const { rows } = await pool().query(
+    `SELECT source_agent, detector, entity_code, severity,
+            COUNT(*)::int AS n,
+            SUM(amount)::float AS total_amount
+       FROM findings
+      WHERE ${where}
+      GROUP BY 1, 2, 3, 4
+      ORDER BY source_agent, detector, entity_code, severity`,
+  );
+  return rows.map((r) => ({
+    sourceAgent: r.source_agent,
+    detector: r.detector,
+    entityCode: r.entity_code ?? null,
+    severity: r.severity,
+    count: r.n ?? 0,
+    totalAmount: r.total_amount ?? null,
+  }));
+}
+
 export interface HermesSkillInventoryRow {
   path: string;
   name: string;
