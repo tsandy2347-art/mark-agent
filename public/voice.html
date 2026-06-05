@@ -53,6 +53,16 @@
   .line .who { font-weight: 400; margin-right: 8px; }
   .line.user .who { color: var(--text); }
   .line.assistant .who { color: var(--cyan); }
+  /* Screen-pop overlay: appears when Mark opens a page mid-conversation. */
+  .pop-overlay { position: fixed; inset: 0; background: rgba(5, 8, 16, 0.92); backdrop-filter: blur(6px); z-index: 50; display: none; flex-direction: column; padding: 14px; }
+  .pop-overlay.active { display: flex; }
+  .pop-bar { display: flex; align-items: center; justify-content: space-between; padding: 6px 14px; background: var(--surface); border: 1px solid var(--border); border-radius: 4px; margin-bottom: 10px; font-family: var(--font-mono); font-size: 11px; letter-spacing: 0.12em; color: var(--cyan); text-transform: uppercase; }
+  .pop-bar .pop-title { display: flex; align-items: center; gap: 10px; }
+  .pop-bar .pop-dot { width: 6px; height: 6px; border-radius: 50%; background: var(--cyan); box-shadow: 0 0 8px var(--cyan); }
+  .pop-close { background: transparent; border: 1px solid var(--border); color: var(--text-dim); padding: 4px 10px; border-radius: 3px; cursor: pointer; font-family: var(--font-mono); font-size: 10px; letter-spacing: 0.12em; }
+  .pop-close:hover { color: var(--red); border-color: var(--red); }
+  .pop-frame-wrap { flex: 1; border: 1px solid var(--border); border-radius: 4px; overflow: hidden; background: #fff; }
+  .pop-frame { width: 100%; height: 100%; border: 0; display: block; }
 </style>
 </head>
 <body>
@@ -88,6 +98,17 @@
     <div class="transcript-body" id="transcriptBody">
       <div id="placeholder" style="color:#5a6478;">Awaiting connection...</div>
     </div>
+  </div>
+</div>
+
+<!-- Screen-pop overlay: Mark opens pages here while he's talking. -->
+<div class="pop-overlay" id="popOverlay">
+  <div class="pop-bar">
+    <div class="pop-title"><span class="pop-dot"></span><span id="popTitle">View</span></div>
+    <button class="pop-close" onclick="closePop()">Close ✕</button>
+  </div>
+  <div class="pop-frame-wrap">
+    <iframe class="pop-frame" id="popFrame" src="about:blank" title="screen"></iframe>
   </div>
 </div>
 
@@ -138,6 +159,7 @@
         document.getElementById('startBtn').style.display = 'none';
         document.getElementById('endBtn').style.display = 'flex';
         document.getElementById('tDot').style.background = '#34d399';
+        startScreenPopPoll();
       });
 
       vapi.on('call-end', () => {
@@ -147,6 +169,7 @@
         document.getElementById('startBtn').disabled = false;
         document.getElementById('endBtn').style.display = 'none';
         document.getElementById('tDot').style.background = '#5a6478';
+        stopScreenPopPoll();
       });
 
       vapi.on('speech-start', () => setStatus('Mark is speaking...', 'talking'));
@@ -177,10 +200,56 @@
 
   function endCall() {
     if (vapi) { vapi.stop(); vapi = null; }
+    stopScreenPopPoll();
+  }
+
+  // ── Screen-pop ────────────────────────────────────────────────────────
+  // While a call is active we poll /api/voice/screen-pop every 800ms. When
+  // Mark fires a [SCREEN: <key>] marker the brain stores it; the next poll
+  // opens that page in an overlay iframe (with the user's basic-auth cookie
+  // already negotiated by the same browser session).
+  const SCREEN_PAGES = {
+    profit:      { url: '/reports/profit',        title: 'Profit report' },
+    cash:        { url: '/cash-forecast',         title: 'Cash forecast' },
+    specialists: { url: '/specialists',           title: 'Specialist health' },
+    settings:    { url: '/specialists/settings',  title: 'Specialist settings' },
+    restricted:  { url: '/restricted',            title: 'Restricted findings' },
+    payroll:     { url: '/payroll-journal',       title: 'Payroll journal' },
+  };
+  let popPoll = null;
+  let popLastAt = 0;
+  function openPop(key) {
+    const page = SCREEN_PAGES[key];
+    if (!page) return;
+    document.getElementById('popTitle').textContent = page.title;
+    document.getElementById('popFrame').src = page.url;
+    document.getElementById('popOverlay').classList.add('active');
+  }
+  function closePop() {
+    document.getElementById('popOverlay').classList.remove('active');
+    document.getElementById('popFrame').src = 'about:blank';
+  }
+  function startScreenPopPoll() {
+    if (popPoll) return;
+    popPoll = setInterval(async () => {
+      try {
+        const r = await fetch('/api/voice/screen-pop', { credentials: 'same-origin' });
+        if (!r.ok) return;
+        const d = await r.json();
+        if (d && d.key && d.at && d.at > popLastAt) {
+          popLastAt = d.at;
+          openPop(d.key);
+        }
+      } catch (_) {}
+    }, 800);
+  }
+  function stopScreenPopPoll() {
+    if (popPoll) { clearInterval(popPoll); popPoll = null; }
   }
 
   window.startCall = startCall;
   window.endCall = endCall;
+  window.closePop = closePop;
 </script>
 </body>
 </html>

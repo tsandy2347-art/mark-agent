@@ -19,6 +19,7 @@ import { type NextRequest } from "next/server";
 import { env } from "@/lib/env";
 import { askMark } from "@/lib/mark/qa";
 import type { QaHistoryTurn } from "@/lib/anthropic";
+import { recordScreenPop } from "@/lib/voice-screen-pop";
 
 export const dynamic = "force-dynamic";
 export const maxDuration = 120;
@@ -175,15 +176,51 @@ export async function POST(req: NextRequest) {
       controller.enqueue(encoder.encode(sseChunk(id, created, { role: "assistant", content: "" }, null)));
 
       let emittedAny = false;
-      // Stream Claude's tokens straight through to Vapi. No scrubbing — the
-      // prompt itself tells Mark not to footer on voice, and we trust him.
-      // If he ever slips, it's a weird tail line on one call, not a bug.
+      // Screen-pop marker. Mark emits `[SCREEN: <key>]` at the very start of
+      // his turn when his answer is about something he can show on a known
+      // page. We BUFFER the first ~60 chars looking for it; if present, capture
+      // the key + strip it from Vapi's spoken stream. The browser polls
+      // /api/voice/screen-pop and opens the matching page in an iframe.
+      let preamble = "";
+      let preambleDone = false;
+      const SCREEN_KEYS = new Set(["profit","cash","specialists","settings","restricted","payroll"]);
+      const flushPreamble = () => {
+        if (preambleDone || !preamble) return;
+        preambleDone = true;
+        const m = preamble.match(/^\s*\[\s*SCREEN\s*:\s*([a-z\-]+)\s*\]\s*/i);
+        let textOut = preamble;
+        if (m) {
+          const key = m[1].toLowerCase();
+          textOut = preamble.slice(m[0].length);
+          if (SCREEN_KEYS.has(key)) {
+            // Fire-and-forget — store the latest pop keyed by sessionId.
+            void recordScreenPop(sessionId, key).catch((e) =>
+              console.warn("[voice] screen-pop store failed:", (e as Error)?.message),
+            );
+          }
+        }
+        if (textOut) {
+          emittedAny = true;
+          controller.enqueue(encoder.encode(sseChunk(id, created, { content: textOut }, null)));
+        }
+        preamble = "";
+      };
       const onText = (delta: string) => {
         if (!delta) return;
+        if (!preambleDone) {
+          preamble += delta;
+          // Decision point: either we have the marker by now, or we don't.
+          // Wait until ~80 chars or a newline — Mark always emits the marker
+          // FIRST so anything past that is just spoken text.
+          if (preamble.length > 80 || /\n/.test(preamble)) {
+            flushPreamble();
+          }
+          return;
+        }
         emittedAny = true;
         controller.enqueue(encoder.encode(sseChunk(id, created, { content: delta }, null)));
       };
-      const flushFinal = () => { /* nothing held back */ };
+      const flushFinal = () => { flushPreamble(); };
 
       try {
         await askMark({
