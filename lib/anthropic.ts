@@ -682,6 +682,7 @@ Known page keys (use ONLY these):
 - \`restricted\` — the people / individual-pay findings list. Open ONLY when answering a restricted-pay question (and only Tony / Nicole / Lindsay have access).
 - \`payroll\` — the payroll journal upload page. Open when discussing a pay run.
 - \`receivables\` — the accounts-receivable dashboard (aged invoices, top 10 debtors, exposure breaches). Open when answering "how much is overdue", "who owes us money", "Monty's biggest debtors", or any overdue-invoice / debtor question.
+- \`revenue\` — the revenue dashboard split by stream (NDIA, SAH, Private, Brokerage, SIL, Plan Mgmt, DVA) with vs-last-month and vs-same-month-last-year deltas. Open when answering "how's revenue", "what's NDIA doing", "are we up on last month", "income by stream", or any "what did we earn" question.
 
 Examples:
 - "What was April profit?" → \`[SCREEN: profit]Roughly a hundred and seventy six thousand, Sir — combined.\`

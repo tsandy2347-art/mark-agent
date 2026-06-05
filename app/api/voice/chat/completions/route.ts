@@ -183,7 +183,7 @@ export async function POST(req: NextRequest) {
       // /api/voice/screen-pop and opens the matching page in an iframe.
       let preamble = "";
       let preambleDone = false;
-      const SCREEN_KEYS = new Set(["profit","cash","specialists","settings","restricted","payroll","receivables"]);
+      const SCREEN_KEYS = new Set(["profit","cash","specialists","settings","restricted","payroll","receivables","revenue"]);
       const flushPreamble = () => {
         if (preambleDone || !preamble) return;
         preambleDone = true;
