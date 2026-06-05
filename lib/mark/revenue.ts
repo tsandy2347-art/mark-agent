@@ -72,15 +72,23 @@ function monthLabel(ym: string): string {
   return new Date(Date.UTC(y, m - 1, 1)).toLocaleString("en-AU", { month: "long", year: "numeric" });
 }
 
-/** "Last fully-settled" month — current if today >= the 20th, else previous. */
+/** Last fully-settled month per Tony's rule:
+ *  "May won't show until 20 June" — i.e. a calendar month X is only counted
+ *  as settled once we're past the 20th of the FOLLOWING month. So:
+ *  - On 5 June  → April is the latest settled (May still in arrears).
+ *  - On 20 June → May becomes the latest.
+ *  - On 5 July  → May is still the latest (June not settled until 20 July).
+ *  Always returns previous-or-earlier — never the current month. */
 export function lastSettledMonth(today: Date = new Date()): string {
   const y = today.getUTCFullYear();
   const m = today.getUTCMonth() + 1; // 1-12
   const day = today.getUTCDate();
-  if (day >= 20) return `${y}-${String(m).padStart(2, "0")}`;
-  // previous month
-  const ny = m === 1 ? y - 1 : y;
-  const nm = m === 1 ? 12 : m - 1;
+  // If we're at or past the 20th, the previous month is settled.
+  // Otherwise the month before that is the latest settled.
+  const back = day >= 20 ? 1 : 2;
+  let nm = m - back;
+  let ny = y;
+  while (nm <= 0) { nm += 12; ny -= 1; }
   return `${ny}-${String(nm).padStart(2, "0")}`;
 }
 
