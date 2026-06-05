@@ -9,6 +9,7 @@ import { prisma } from "../prisma";
 export const STREAMS = [
   "NDIA",
   "SAH",
+  "HCP",         // retired but appears in historic data — show separately, don't bucket as Other
   "Private",
   "Brokerage",
   "SIL",
@@ -17,10 +18,13 @@ export const STREAMS = [
 ] as const;
 export type Stream = (typeof STREAMS)[number];
 
-// Map Xero account names to Tony's seven streams. Anything not matched goes
-// to "Other" (still surfaced — never silently dropped).
+// Map Xero account names to Tony's canonical streams. Anything not matched
+// goes to "Other" (still surfaced — never silently dropped).
 function streamOf(accountName: string): Stream | "Other" {
   const n = accountName.toLowerCase();
+  // HCP must be checked BEFORE generic SAH/NDIS — "Home Care Package" is
+  // distinct from SAH.
+  if (n.includes("hcp") || n.includes("home care package")) return "HCP";
   if (n.includes("ndis") || n.includes("ndia")) return "NDIA";
   if (n.includes("sah") || n.includes("support at home")) return "SAH";
   if (n.includes("dva")) return "DVA";
@@ -40,23 +44,22 @@ export interface MonthByStream {
 }
 
 export interface RevenueSummary {
-  /** Last fully-settled month — "current month, only if past day 20; otherwise
-   *  previous month". Honours the arrears rule. */
+  /** Last fully-settled month per Tony's rule (see lastSettledMonth). */
   asOfMonth: string;
   asOfLabel: string;
-  /** Total revenue split — last 13 months. Ordered oldest → newest. */
-  monthly: MonthByStream[];
-  /** Per-entity (SC, CQ) version of the same 13-month series for the entity
-   *  table. Only the most recent month gets shown there. */
-  entityMostRecent: { entity: "SC" | "CQ"; month: string; total: number; byStream: Record<Stream | "Other", number> }[];
-  /** Quick deltas for the three headline numbers. */
-  prevMonth?: MonthByStream;
-  yoyMonth?: MonthByStream;
-  asOf: MonthByStream;
+  /** Per-entity views of the last 13 months. Combined is intentionally
+   *  excluded — Tony's call: "combined is no good for me". */
+  entities: {
+    entity: "SC" | "CQ";
+    monthly: MonthByStream[];      // 13 months, oldest → newest
+    asOf: MonthByStream;
+    prevMonth?: MonthByStream;
+    yoyMonth?: MonthByStream;
+  }[];
 }
 
 function emptyByStream(): Record<Stream | "Other", number> {
-  return { NDIA: 0, SAH: 0, Private: 0, Brokerage: 0, SIL: 0, "Plan Mgmt": 0, DVA: 0, Other: 0 };
+  return { NDIA: 0, SAH: 0, HCP: 0, Private: 0, Brokerage: 0, SIL: 0, "Plan Mgmt": 0, DVA: 0, Other: 0 };
 }
 
 function decMonth(ym: string, by = 1): string {
@@ -116,40 +119,26 @@ export async function loadRevenueSummary(): Promise<RevenueSummary> {
     select: { entityCode: true, month: true, totalIncome: true, lineItems: true },
   });
 
-  // Combined per month
-  const byMonth = new Map<string, Array<{ totalIncome: number | null; lineItems: unknown }>>();
+  // Per-entity x per-month bucket
+  const byEnt = new Map<string, Map<string, Array<{ totalIncome: number | null; lineItems: unknown }>>>();
+  for (const ent of ["SC", "CQ"]) byEnt.set(ent, new Map());
   for (const r of rows) {
-    if (!byMonth.has(r.month)) byMonth.set(r.month, []);
-    byMonth.get(r.month)!.push({ totalIncome: r.totalIncome, lineItems: r.lineItems });
+    const em = byEnt.get(r.entityCode);
+    if (!em) continue;
+    if (!em.has(r.month)) em.set(r.month, []);
+    em.get(r.month)!.push({ totalIncome: r.totalIncome, lineItems: r.lineItems });
   }
 
-  const monthly = months.map((m) => rollMonth(byMonth.get(m) ?? [], m));
+  const entities: RevenueSummary["entities"] = (["SC", "CQ"] as const).map((ent) => {
+    const em = byEnt.get(ent) ?? new Map();
+    const monthly = months.map((m) => rollMonth(em.get(m) ?? [], m));
+    const asOfRow = monthly.find((m) => m.month === asOf)!;
+    const prev = monthly.find((m) => m.month === decMonth(asOf, 1));
+    const yoy = monthly.find((m) => m.month === decMonth(asOf, 12));
+    return { entity: ent, monthly, asOf: asOfRow, prevMonth: prev, yoyMonth: yoy };
+  });
 
-  const asOfRow = monthly.find((m) => m.month === asOf)!;
-  const prevRow = monthly.find((m) => m.month === decMonth(asOf, 1));
-  const yoyRow  = monthly.find((m) => m.month === decMonth(asOf, 12));
-
-  // Per-entity, just for the asOf month
-  const entityMostRecent: RevenueSummary["entityMostRecent"] = [];
-  for (const ent of ["SC", "CQ"] as const) {
-    const r = rows.find((x) => x.entityCode === ent && x.month === asOf);
-    if (!r) {
-      entityMostRecent.push({ entity: ent, month: asOf, total: 0, byStream: emptyByStream() });
-      continue;
-    }
-    const m = rollMonth([{ totalIncome: r.totalIncome, lineItems: r.lineItems }], asOf);
-    entityMostRecent.push({ entity: ent, month: asOf, total: m.total, byStream: m.byStream });
-  }
-
-  return {
-    asOfMonth: asOf,
-    asOfLabel: monthLabel(asOf),
-    monthly,
-    entityMostRecent,
-    asOf: asOfRow,
-    prevMonth: prevRow,
-    yoyMonth: yoyRow,
-  };
+  return { asOfMonth: asOf, asOfLabel: monthLabel(asOf), entities };
 }
 
 export function pctDelta(now: number, prev: number | undefined): { abs: number; pct: number | null } {
