@@ -34,6 +34,7 @@ export default async function RootLayout({ children }: { children: React.ReactNo
             <Link href="/hermes-activity" className="appbar-link">Hermes</Link>
             <Link href="/goals" className="appbar-link">Goals</Link>
             <Link href="/reports/profit" className="appbar-link">Reports</Link>
+            <Link href="/reports/receivables" className="appbar-link">Receivables</Link>
             <Link href="/cash-forecast" className="appbar-link">Cash forecast</Link>
             <Link href="/payroll-journal" className="appbar-link">Payroll journal</Link>
             <Link href="/qa" className="appbar-link">Ask Mark</Link>
