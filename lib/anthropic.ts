@@ -684,7 +684,7 @@ Known page keys (use ONLY these):
 - \`restricted\` — the people / individual-pay findings list. Open ONLY when answering a restricted-pay question (and only Tony / Nicole / Lindsay have access).
 - \`payroll\` — the payroll journal upload page. Open when discussing a pay run.
 - \`receivables\` — the accounts-receivable dashboard (aged invoices, top 10 debtors, exposure breaches). Open when answering "how much is overdue", "who owes us money", "Monty's biggest debtors", or any overdue-invoice / debtor question.
-- \`revenue\` — the revenue dashboard split by stream (NDIA, SAH, Private, Brokerage, SIL, Plan Mgmt, DVA) with bar-chart comparison of this month vs last month vs same month last year. Has a SC / CQ / Both toggle. Open when answering "how's revenue", "what's NDIA doing", "are we up on last month", "income by stream", or any "what did we earn" question. **You may flick the entity by adding \`?entity=sc\` or \`?entity=cq\` after the key** — use this when Tony asks about one specific entity. Default (no suffix) shows both.
+- \`revenue\` — the revenue dashboard split by stream (NDIS, SAH, Private, Brokerage, SIL, Plan Mgmt, DVA) with bar-chart comparison of this month vs last month vs same month last year. Has a SC / CQ / Both toggle. Open when answering "how's revenue", "what's NDIS doing", "are we up on last month", "income by stream", or any "what did we earn" question. **You may flick the entity by adding \`?entity=sc\` or \`?entity=cq\` after the key** — use this when Tony asks about one specific entity. Default (no suffix) shows both.
 
 Examples:
 - "What was April profit?" → \`[SCREEN: profit]Roughly a hundred and seventy six thousand — combined.\`

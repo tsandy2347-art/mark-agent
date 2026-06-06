@@ -7,7 +7,7 @@
 import { prisma } from "../prisma";
 
 export const STREAMS = [
-  "NDIA",
+  "NDIS",
   "SAH",         // includes legacy HCP (Home Care Package) — same program, renamed
   "Private",
   "Brokerage",
@@ -28,7 +28,7 @@ export function streamOf(accountName: string): Stream | "Other" {
   // HCP = legacy Home Care Package; folded into SAH (Support at Home) — same
   // program, just renamed under the reform. Tony's rule.
   if (n.includes("hcp") || n.includes("home care package")) return "SAH";
-  if (n.includes("ndis") || n.includes("ndia")) return "NDIA";
+  if (n.includes("ndis") || n.includes("ndia")) return "NDIS";
   if (n.includes("sah") || n.includes("support at home")) return "SAH";
   if (n.includes("dva")) return "DVA";
   if (n.includes("plan management")) return "Plan Mgmt";
@@ -62,7 +62,7 @@ export interface RevenueSummary {
 }
 
 function emptyByStream(): Record<Stream | "Other", number> {
-  return { NDIA: 0, SAH: 0, Private: 0, Brokerage: 0, SIL: 0, "Plan Mgmt": 0, DVA: 0, Other: 0 };
+  return { NDIS: 0, SAH: 0, Private: 0, Brokerage: 0, SIL: 0, "Plan Mgmt": 0, DVA: 0, Other: 0 };
 }
 
 function decMonth(ym: string, by = 1): string {

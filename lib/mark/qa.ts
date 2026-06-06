@@ -183,7 +183,7 @@ export async function askMark(input: AskInput): Promise<AskOutput> {
           "wages, income by account, etc. — call the lookup_month_detail tool with " +
           "the entity and month to get the line-by-line accounts, then quote those " +
           "amounts EXACTLY. Don't guess a breakdown from the totals. " +
-          "INCOME STREAMS — the tool returns the SEVEN canonical streams (NDIA Income, " +
+          "INCOME STREAMS — the tool returns the SEVEN canonical streams (NDIS Income, " +
           "SAH Income, Private Income, Brokerage Income, SIL Income, Plan Mgmt Income, " +
           "DVA Income, plus 'Other Income' for anything unmapped). Legacy HCP (Home " +
           "Care Package) is folded into SAH at the tool layer — they are the SAME " +

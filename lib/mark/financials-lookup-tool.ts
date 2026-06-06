@@ -17,7 +17,7 @@ import { prisma } from "../prisma";
 import { streamOf } from "./revenue";
 
 // For income lines we collapse the raw Xero account name to Tony's canonical
-// stream label (NDIA / SAH / Private / Brokerage / SIL / Plan Mgmt / DVA /
+// stream label (NDIS / SAH / Private / Brokerage / SIL / Plan Mgmt / DVA /
 // Other). Without this, Mark sees "HCP Income" and "SAH Income" as separate
 // streams and reads them both out — but HCP is the legacy name for SAH (same
 // program, just renamed under the reform), so they MUST be presented as one.
