@@ -198,14 +198,17 @@ export async function POST(req: NextRequest) {
       const flushPreamble = () => {
         if (preambleDone || !preamble) return;
         preambleDone = true;
-        const m = preamble.match(/^\s*\[\s*SCREEN\s*:\s*([a-z\-]+)\s*\]\s*/i);
+        // Marker now allows optional query string, e.g. [SCREEN: revenue?entity=cq]
+        const m = preamble.match(/^\s*\[\s*SCREEN\s*:\s*([a-z\-]+)(\?[^\]\s]*)?\s*\]\s*/i);
         let textOut = preamble;
         if (m) {
           const key = m[1].toLowerCase();
+          const args = (m[2] || "").trim(); // includes leading '?' or empty
           textOut = preamble.slice(m[0].length);
           if (SCREEN_KEYS.has(key)) {
+            const popKey = args ? `${key}${args}` : key;
             // Fire-and-forget — store the latest pop keyed by sessionId.
-            void recordScreenPop(sessionId, key).catch((e) =>
+            void recordScreenPop(sessionId, popKey).catch((e) =>
               console.warn("[voice] screen-pop store failed:", (e as Error)?.message),
             );
           }

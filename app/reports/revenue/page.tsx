@@ -1,19 +1,30 @@
-// /reports/revenue — Mark's revenue dashboard, SC and CQ side-by-side.
+// /reports/revenue?entity=sc|cq|both — Mark's revenue dashboard.
 //
-// Reads stored MonthlyFinancials. NO combined view — per Tony, combined is
-// useless given how different the two entities are. Each entity has its own
-// KPI cards, per-stream breakdown, trend chart, and deltas vs last month +
-// same month last year.
+// Top of page: SC / CQ / Both toggle. Mark can flip it on a call by
+// emitting [SCREEN: revenue?entity=cq] etc.
+//
+// For each visible entity: KPI cards, then a bar chart per stream with three
+// bars side-by-side — this month / last month / same month last year.
+//
+// Bottom of page: combined-totals strip (SC + CQ) for the as-of month.
 
+import Link from "next/link";
 import {
   loadRevenueSummary,
   pctDelta,
   STREAMS,
   type Stream,
 } from "@/lib/mark/revenue";
-import { CHART_COLORS, groupedBars } from "@/lib/charts";
 
 export const dynamic = "force-dynamic";
+
+type EntityKey = "sc" | "cq" | "both";
+
+function parseEntity(raw: string | string[] | undefined): EntityKey {
+  const v = (Array.isArray(raw) ? raw[0] : raw)?.toLowerCase();
+  if (v === "sc" || v === "cq") return v;
+  return "both";
+}
 
 function fmtAmount(n: number): string {
   return new Intl.NumberFormat("en-AU", {
@@ -41,28 +52,27 @@ function deltaArrow(abs: number): string {
   return "→";
 }
 
-function monthShort(ym: string): string {
+function monthShortYr(ym: string): string {
   const [y, m] = ym.split("-").map(Number);
-  return new Date(Date.UTC(y, m - 1, 1)).toLocaleString("en-AU", { month: "short" });
+  return new Date(Date.UTC(y, m - 1, 1)).toLocaleString("en-AU", { month: "short", year: "2-digit" });
 }
 
-interface EntityBlockProps {
+interface EntityView {
   entity: "SC" | "CQ";
-  monthly: { month: string; total: number; byStream: Record<Stream | "Other", number> }[];
   asOf: { month: string; total: number; byStream: Record<Stream | "Other", number> };
   prev?: { month: string; total: number; byStream: Record<Stream | "Other", number> };
   yoy?: { month: string; total: number; byStream: Record<Stream | "Other", number> };
   asOfLabel: string;
 }
 
-function EntityBlock({ entity, monthly, asOf, prev, yoy, asOfLabel }: EntityBlockProps) {
+function EntityBlock({ entity, asOf, prev, yoy, asOfLabel }: EntityView) {
   const total = asOf.total;
   const prevTotal = prev?.total ?? 0;
   const yoyTotal = yoy?.total ?? 0;
   const dPrev = pctDelta(total, prevTotal);
   const dYoy = pctDelta(total, yoyTotal);
 
-  // Streams in order of size in the as-of month.
+  // Streams used by this entity, sorted by this-month size.
   const streamRows = (STREAMS as readonly Stream[])
     .map((s) => ({
       stream: s,
@@ -70,7 +80,7 @@ function EntityBlock({ entity, monthly, asOf, prev, yoy, asOfLabel }: EntityBloc
       prev: prev?.byStream[s] ?? 0,
       yoy: yoy?.byStream[s] ?? 0,
     }))
-    .filter((r) => r.now > 0 || r.prev > 0 || r.yoy > 0) // hide streams this entity has never used
+    .filter((r) => r.now > 0 || r.prev > 0 || r.yoy > 0)
     .sort((a, b) => b.now - a.now);
   const otherNow = asOf.byStream.Other ?? 0;
   if (otherNow > 0 || (prev?.byStream.Other ?? 0) > 0 || (yoy?.byStream.Other ?? 0) > 0) {
@@ -82,23 +92,24 @@ function EntityBlock({ entity, monthly, asOf, prev, yoy, asOfLabel }: EntityBloc
     });
   }
 
-  // Trend chart: this entity's top three streams by current-month size.
-  const topStreams = streamRows.slice(0, 3).map((r) => r.stream);
-  const chart = groupedBars({
-    categories: monthly.map((m) => monthShort(m.month)),
-    series: topStreams.map((s, idx) => ({
-      label: s,
-      color: [CHART_COLORS.cyan, CHART_COLORS.indigo, CHART_COLORS.emerald][idx],
-      values: monthly.map((m) => m.byStream[s as Stream] ?? 0),
-    })),
-    width: 720,
-    height: 200,
-  });
+  // Chart scale — single y-axis across all streams for this entity so the
+  // bars are comparable at a glance.
+  const yMax = Math.max(
+    ...streamRows.flatMap((r) => [r.now, r.prev, r.yoy]),
+    1,
+  );
+
+  const prevLabel = prev ? monthShortYr(prev.month) : "Last month";
+  const yoyLabel = yoy ? monthShortYr(yoy.month) : "YoY";
+  const nowLabel = monthShortYr(asOf.month);
 
   return (
     <div style={{ marginTop: 24 }}>
-      <h2 style={{ margin: "0 0 10px", fontSize: 18 }}>
-        {entity} <span className="muted" style={{ fontSize: 13, fontWeight: 400, marginLeft: 8 }}>{asOfLabel}</span>
+      <h2 style={{ margin: "0 0 10px", fontSize: 20 }}>
+        {entity}
+        <span className="muted" style={{ fontSize: 13, fontWeight: 400, marginLeft: 10 }}>
+          {asOfLabel}
+        </span>
       </h2>
 
       {/* KPI cards */}
@@ -120,104 +131,238 @@ function EntityBlock({ entity, monthly, asOf, prev, yoy, asOfLabel }: EntityBloc
         />
       </div>
 
-      {/* Per-stream */}
-      <div className="card" style={{ marginTop: 14, padding: 0, overflow: "hidden" }}>
-        <h3 style={{ margin: 0, padding: "10px 16px", fontSize: 12, textTransform: "uppercase", letterSpacing: 1.2, color: "var(--fg-muted)", borderBottom: "1px solid var(--border)" }}>
-          By income stream
+      {/* Per-stream bar chart */}
+      <div className="card" style={{ marginTop: 14, padding: 16 }}>
+        <h3 style={{ margin: 0, fontSize: 12, textTransform: "uppercase", letterSpacing: 1.2, color: "var(--fg-muted)" }}>
+          By income stream — three-month comparison
         </h3>
-        <table>
-          <thead>
-            <tr>
-              <th>Stream</th>
-              <th style={{ textAlign: "right" }}>{asOfLabel}</th>
-              <th style={{ textAlign: "right" }}>Last month</th>
-              <th style={{ textAlign: "right" }}>Δ vs last</th>
-              <th style={{ textAlign: "right" }}>YoY same month</th>
-              <th style={{ textAlign: "right" }}>Δ YoY</th>
-            </tr>
-          </thead>
-          <tbody>
-            {streamRows.map((r) => {
-              const dp = pctDelta(r.now, r.prev);
-              const dy = pctDelta(r.now, r.yoy);
-              return (
-                <tr key={r.stream}>
-                  <td className="mono" style={{ fontSize: 13 }}>{r.stream}</td>
-                  <td className="mono" style={{ textAlign: "right" }}>{r.now === 0 ? "—" : fmtAmount(r.now)}</td>
-                  <td className="mono" style={{ textAlign: "right", color: "var(--fg-muted)", fontSize: 12 }}>{r.prev === 0 ? "—" : fmtAmount(r.prev)}</td>
-                  <td className="mono" style={{ textAlign: "right", color: deltaColor(dp.abs), fontSize: 12 }}>
-                    {r.prev === 0 && r.now === 0 ? "—" : `${deltaArrow(dp.abs)} ${fmtPct(dp.pct)}`}
-                  </td>
-                  <td className="mono" style={{ textAlign: "right", color: "var(--fg-muted)", fontSize: 12 }}>{r.yoy === 0 ? "—" : fmtAmount(r.yoy)}</td>
-                  <td className="mono" style={{ textAlign: "right", color: deltaColor(dy.abs), fontSize: 12 }}>
-                    {r.yoy === 0 && r.now === 0 ? "—" : `${deltaArrow(dy.abs)} ${fmtPct(dy.pct)}`}
-                  </td>
-                </tr>
-              );
-            })}
-          </tbody>
-        </table>
-      </div>
-
-      {/* Trend chart */}
-      {topStreams.length > 0 && (
-        <div className="card" style={{ marginTop: 14, padding: 16 }}>
-          <h3 style={{ marginTop: 0, fontSize: 12, textTransform: "uppercase", letterSpacing: 1.2, color: "var(--fg-muted)" }}>
-            Trend · top streams · last 13 months
-          </h3>
-          <svg viewBox={`0 0 ${chart.width} ${chart.height}`} style={{ display: "block", maxWidth: "100%", height: "auto", marginTop: 8 }}>
-            {chart.bars.map((b, i) => (
-              <rect key={i} x={b.x} y={b.y} width={b.w} height={b.h} fill={b.color} opacity={b.faded ? 0.3 : 1} />
-            ))}
-            {chart.catLabels.map((l, i) => (
-              <text key={i} x={l.x} y={chart.height - chart.padB + 18} fontSize="11" fill="#8a96ac" textAnchor="middle">{l.label}</text>
-            ))}
-            {chart.ticks.map((t, i) => (
-              <text key={i} x={chart.padL - 6} y={t.y + 3} fontSize="10" fill="#5a6478" textAnchor="end">{t.label}</text>
-            ))}
-          </svg>
-          <div style={{ display: "flex", gap: 18, fontSize: 12, color: "var(--fg-muted)", marginTop: 8 }}>
-            {topStreams.map((s, i) => (
-              <span key={s}>
-                <span style={{ display: "inline-block", width: 10, height: 10, background: [CHART_COLORS.cyan, CHART_COLORS.indigo, CHART_COLORS.emerald][i], marginRight: 6, verticalAlign: "middle" }} />
-                {s}
-              </span>
-            ))}
-          </div>
+        <div style={{ display: "flex", gap: 18, fontSize: 12, color: "var(--fg-muted)", marginTop: 8, marginBottom: 12 }}>
+          <LegendDot color="var(--cyan)" label={`${nowLabel} (this)`} />
+          <LegendDot color="var(--indigo)" label={`${prevLabel} (last)`} />
+          <LegendDot color="var(--emerald)" label={`${yoyLabel} (YoY)`} />
         </div>
-      )}
+
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(220px, 1fr))", gap: 14 }}>
+          {streamRows.map((r) => (
+            <StreamBars
+              key={r.stream}
+              stream={r.stream}
+              now={r.now}
+              prev={r.prev}
+              yoy={r.yoy}
+              yMax={yMax}
+              nowLabel={nowLabel}
+              prevLabel={prevLabel}
+              yoyLabel={yoyLabel}
+            />
+          ))}
+        </div>
+      </div>
     </div>
   );
 }
 
-export default async function RevenueReportPage() {
+function StreamBars({
+  stream, now, prev, yoy, yMax, nowLabel, prevLabel, yoyLabel,
+}: {
+  stream: string;
+  now: number;
+  prev: number;
+  yoy: number;
+  yMax: number;
+  nowLabel: string;
+  prevLabel: string;
+  yoyLabel: string;
+}) {
+  // SVG: three vertical bars, labels under, value tags on top of each bar.
+  const W = 220;
+  const H = 140;
+  const padL = 8;
+  const padR = 8;
+  const padT = 24;
+  const padB = 22;
+  const innerW = W - padL - padR;
+  const innerH = H - padT - padB;
+  const slot = innerW / 3;
+  const barW = slot * 0.62;
+
+  function bar(value: number, idx: number, color: string, label: string) {
+    const h = yMax > 0 ? (value / yMax) * innerH : 0;
+    const x = padL + slot * idx + (slot - barW) / 2;
+    const y = padT + innerH - h;
+    return (
+      <g key={idx}>
+        <rect x={x} y={y} width={barW} height={Math.max(h, 1)} fill={color} rx={2} />
+        {value > 0 && (
+          <text x={x + barW / 2} y={y - 4} fontSize="10" fill="var(--fg)" textAnchor="middle">
+            {fmtAmount(value)}
+          </text>
+        )}
+        <text x={x + barW / 2} y={padT + innerH + 14} fontSize="10" fill="#8a96ac" textAnchor="middle">
+          {label}
+        </text>
+      </g>
+    );
+  }
+
+  // Delta caption under the title — vs last month, vs YoY.
+  const dp = pctDelta(now, prev);
+  const dy = pctDelta(now, yoy);
+
+  return (
+    <div style={{ background: "var(--bg-elev)", border: "1px solid var(--border)", borderRadius: 6, padding: 10 }}>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", marginBottom: 4 }}>
+        <strong style={{ fontSize: 13 }}>{stream}</strong>
+        <span className="mono" style={{ fontSize: 12, color: "var(--fg)" }}>{fmtAmount(now)}</span>
+      </div>
+      <div className="muted" style={{ fontSize: 11, marginBottom: 6 }}>
+        <span style={{ color: deltaColor(dp.abs) }}>{deltaArrow(dp.abs)} {fmtPct(dp.pct)}</span>
+        <span> vs last · </span>
+        <span style={{ color: deltaColor(dy.abs) }}>{deltaArrow(dy.abs)} {fmtPct(dy.pct)}</span>
+        <span> YoY</span>
+      </div>
+      <svg viewBox={`0 0 ${W} ${H}`} style={{ display: "block", width: "100%", height: "auto" }}>
+        {bar(now, 0, "var(--cyan)", nowLabel)}
+        {bar(prev, 1, "var(--indigo)", prevLabel)}
+        {bar(yoy, 2, "var(--emerald)", yoyLabel)}
+      </svg>
+    </div>
+  );
+}
+
+function CombinedFooter({
+  scAsOf, cqAsOf, scPrev, cqPrev, scYoy, cqYoy, asOfLabel,
+}: {
+  scAsOf: { total: number };
+  cqAsOf: { total: number };
+  scPrev?: { total: number };
+  cqPrev?: { total: number };
+  scYoy?: { total: number };
+  cqYoy?: { total: number };
+  asOfLabel: string;
+}) {
+  const total = scAsOf.total + cqAsOf.total;
+  const prev = (scPrev?.total ?? 0) + (cqPrev?.total ?? 0);
+  const yoy = (scYoy?.total ?? 0) + (cqYoy?.total ?? 0);
+  const dp = pctDelta(total, prev);
+  const dy = pctDelta(total, yoy);
+  return (
+    <div className="card" style={{ marginTop: 24, padding: 16, borderTop: "2px solid var(--cyan)" }}>
+      <h3 style={{ margin: 0, fontSize: 12, textTransform: "uppercase", letterSpacing: 1.2, color: "var(--fg-muted)" }}>
+        Combined · SC + CQ · {asOfLabel}
+      </h3>
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(200px, 1fr))", gap: 12, marginTop: 10 }}>
+        <KpiCard label="Total" value={total} color="var(--cyan)" />
+        <KpiCard
+          label="vs last month"
+          value={dp.abs}
+          sub={`${fmtPct(dp.pct)} · was ${fmtAmount(prev)}`}
+          color={deltaColor(dp.abs)}
+          arrow={deltaArrow(dp.abs)}
+        />
+        <KpiCard
+          label="vs same month last year"
+          value={dy.abs}
+          sub={`${fmtPct(dy.pct)} · was ${fmtAmount(yoy)}`}
+          color={deltaColor(dy.abs)}
+          arrow={deltaArrow(dy.abs)}
+        />
+      </div>
+    </div>
+  );
+}
+
+function Toggle({ active }: { active: EntityKey }) {
+  const opts: { key: EntityKey; label: string }[] = [
+    { key: "sc", label: "SC" },
+    { key: "cq", label: "CQ" },
+    { key: "both", label: "Both" },
+  ];
+  return (
+    <div style={{ display: "inline-flex", gap: 4, padding: 4, background: "var(--bg-elev)", border: "1px solid var(--border)", borderRadius: 8 }}>
+      {opts.map((o) => {
+        const on = o.key === active;
+        return (
+          <Link
+            key={o.key}
+            href={`/reports/revenue?entity=${o.key}`}
+            style={{
+              padding: "6px 14px",
+              borderRadius: 6,
+              fontSize: 13,
+              fontWeight: 600,
+              textDecoration: "none",
+              background: on ? "var(--cyan)" : "transparent",
+              color: on ? "var(--bg)" : "var(--fg-muted)",
+            }}
+          >
+            {o.label}
+          </Link>
+        );
+      })}
+    </div>
+  );
+}
+
+export default async function RevenueReportPage({
+  searchParams,
+}: {
+  searchParams: Promise<{ entity?: string | string[] }>;
+}) {
+  const sp = await searchParams;
+  const active = parseEntity(sp.entity);
   const data = await loadRevenueSummary();
+
+  const sc = data.entities.find((e) => e.entity === "SC")!;
+  const cq = data.entities.find((e) => e.entity === "CQ")!;
+
+  const showSc = active === "sc" || active === "both";
+  const showCq = active === "cq" || active === "both";
 
   return (
     <main className="container">
-      <div style={{ display: "flex", alignItems: "baseline", justifyContent: "space-between", gap: 16, flexWrap: "wrap" }}>
-        <h1 style={{ margin: 0 }}>Revenue</h1>
+      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 16, flexWrap: "wrap" }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 14 }}>
+          <h1 style={{ margin: 0 }}>Revenue</h1>
+          <Toggle active={active} />
+        </div>
         <span className="muted mono" style={{ fontSize: 12 }}>
-          Last fully-settled month · {data.asOfLabel}
+          Last fully-settled · {data.asOfLabel}
         </span>
       </div>
       <p className="muted" style={{ marginTop: 4, fontSize: 12 }}>
-        Per entity — combined view intentionally excluded.
-        Tony&apos;s arrears rule: month X only counts after the 20th of the following month
-        (so May won&apos;t show until 20 June).
+        Arrears rule: month X only counts after the 20th of the next month.
+        Toggle the view between SC, CQ, or Both — Mark can flick this on a call.
       </p>
 
-      {data.entities.map((e) => (
+      {showSc && (
         <EntityBlock
-          key={e.entity}
-          entity={e.entity}
-          monthly={e.monthly}
-          asOf={e.asOf}
-          prev={e.prevMonth}
-          yoy={e.yoyMonth}
+          entity="SC"
+          asOf={sc.asOf}
+          prev={sc.prevMonth}
+          yoy={sc.yoyMonth}
           asOfLabel={data.asOfLabel}
         />
-      ))}
+      )}
+      {showCq && (
+        <EntityBlock
+          entity="CQ"
+          asOf={cq.asOf}
+          prev={cq.prevMonth}
+          yoy={cq.yoyMonth}
+          asOfLabel={data.asOfLabel}
+        />
+      )}
+
+      <CombinedFooter
+        scAsOf={sc.asOf}
+        cqAsOf={cq.asOf}
+        scPrev={sc.prevMonth}
+        cqPrev={cq.prevMonth}
+        scYoy={sc.yoyMonth}
+        cqYoy={cq.yoyMonth}
+        asOfLabel={data.asOfLabel}
+      />
     </main>
   );
 }
@@ -231,5 +376,14 @@ function KpiCard({ label, value, sub, color, arrow }: { label: string; value: nu
       </div>
       {sub && <div className="muted" style={{ fontSize: 11, marginTop: 4 }}>{sub}</div>}
     </div>
+  );
+}
+
+function LegendDot({ color, label }: { color: string; label: string }) {
+  return (
+    <span>
+      <span style={{ display: "inline-block", width: 10, height: 10, background: color, marginRight: 6, verticalAlign: "middle", borderRadius: 2 }} />
+      {label}
+    </span>
   );
 }

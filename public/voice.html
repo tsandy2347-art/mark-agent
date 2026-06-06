@@ -220,11 +220,15 @@
   };
   let popPoll = null;
   let popLastAt = 0;
-  function openPop(key) {
+  function openPop(rawKey) {
+    // rawKey may include query string, e.g. 'revenue?entity=cq'
+    const qIdx = rawKey.indexOf('?');
+    const key = qIdx >= 0 ? rawKey.slice(0, qIdx) : rawKey;
+    const qs  = qIdx >= 0 ? rawKey.slice(qIdx) : '';
     const page = SCREEN_PAGES[key];
     if (!page) return;
     document.getElementById('popTitle').textContent = page.title;
-    document.getElementById('popFrame').src = page.url;
+    document.getElementById('popFrame').src = page.url + qs;
     document.getElementById('popOverlay').classList.add('active');
   }
   function closePop() {
