@@ -182,7 +182,21 @@ export async function askMark(input: AskInput): Promise<AskOutput> {
           "When the user asks what made up a month — biggest expenses, how much on " +
           "wages, income by account, etc. — call the lookup_month_detail tool with " +
           "the entity and month to get the line-by-line accounts, then quote those " +
-          "amounts EXACTLY. Don't guess a breakdown from the totals.",
+          "amounts EXACTLY. Don't guess a breakdown from the totals. " +
+          "INCOME STREAMS — the tool returns the SEVEN canonical streams (NDIA Income, " +
+          "SAH Income, Private Income, Brokerage Income, SIL Income, Plan Mgmt Income, " +
+          "DVA Income, plus 'Other Income' for anything unmapped). Legacy HCP (Home " +
+          "Care Package) is folded into SAH at the tool layer — they are the SAME " +
+          "program renamed under the reform. NEVER quote them as two separate streams. " +
+          "REVENUE WALK — when the user asks 'how's revenue' / 'walk me through revenue' " +
+          "/ 'income by stream' / any stream-level revenue question, call " +
+          "lookup_month_detail with months=[asOf, lastMonth, sameMonthLastYear] for the " +
+          "asked-about entity (or 'both'), then walk EACH stream in turn — for each one, " +
+          "give the current $ then whether it's up or down vs last month AND vs same " +
+          "month last year. Order largest-first. Mention any stream that's now zero but " +
+          "wasn't last year (or vice versa) — that's usually a program ending. Sample " +
+          "shape per stream: 'SAH, one-point-three million, up about two percent on " +
+          "March, basically flat on April last year'. Keep each line to ONE sentence.",
         SC: stripDetail(financials.SC?.months),
         CQ: stripDetail(financials.CQ?.months),
         consolidated: financials.consolidated ?? null,

@@ -14,6 +14,42 @@
 
 import Anthropic from "@anthropic-ai/sdk";
 import { prisma } from "../prisma";
+import { streamOf } from "./revenue";
+
+// For income lines we collapse the raw Xero account name to Tony's canonical
+// stream label (NDIA / SAH / Private / Brokerage / SIL / Plan Mgmt / DVA /
+// Other). Without this, Mark sees "HCP Income" and "SAH Income" as separate
+// streams and reads them both out — but HCP is the legacy name for SAH (same
+// program, just renamed under the reform), so they MUST be presented as one.
+function foldIncomeAccount(section: PLLine["section"], account: string): string {
+  if (section !== "income") return account;
+  const s = streamOf(account);
+  // Map to a user-facing stream label. "Other" stays as "Other Income" so it
+  // never silently disappears.
+  return s === "Other" ? "Other Income" : `${s} Income`;
+}
+
+function foldLineItems(items: PLLine[]): PLLine[] {
+  // Group income by canonical stream; pass through every other section.
+  const byKey = new Map<string, PLLine>();
+  const out: PLLine[] = [];
+  for (const li of items) {
+    if (li.section !== "income") {
+      out.push(li);
+      continue;
+    }
+    const folded = foldIncomeAccount(li.section, li.account);
+    const k = `income|${folded}`;
+    const cur = byKey.get(k);
+    if (cur) cur.amount += li.amount;
+    else {
+      const merged: PLLine = { section: "income", account: folded, amount: li.amount };
+      byKey.set(k, merged);
+      out.push(merged);
+    }
+  }
+  return out;
+}
 
 export const LOOKUP_MONTH_DETAIL_TOOL: Anthropic.Messages.Tool = {
   name: "lookup_month_detail",
@@ -166,7 +202,8 @@ export async function executeLookupMonthDetailTool(args: LookupInput): Promise<L
         continue;
       }
       const raw = Array.isArray(r.lineItems) ? (r.lineItems as unknown as PLLine[]) : [];
-      const sorted = [...raw].sort((a, b) => Math.abs(b.amount) - Math.abs(a.amount));
+      const folded = foldLineItems(raw);
+      const sorted = [...folded].sort((a, b) => Math.abs(b.amount) - Math.abs(a.amount));
       slices.push({
         entity: e,
         month: m,
@@ -221,7 +258,8 @@ export async function executeLookupMonthDetailTool(args: LookupInput): Promise<L
             netProfit: r.netProfit,
           });
           const raw = Array.isArray(r.lineItems) ? (r.lineItems as unknown as PLLine[]) : [];
-          for (const l of raw) {
+          const folded = foldLineItems(raw);
+          for (const l of folded) {
             const k = `${l.section}|${l.account}`;
             const cur = byAccount.get(k);
             if (cur) cur.amount += l.amount;

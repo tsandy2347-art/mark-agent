@@ -19,7 +19,11 @@ export type Stream = (typeof STREAMS)[number];
 
 // Map Xero account names to Tony's canonical streams. Anything not matched
 // goes to "Other" (still surfaced — never silently dropped).
-function streamOf(accountName: string): Stream | "Other" {
+//
+// EXPORTED so the financials-lookup tool (and any other consumer) folds the
+// same way the /reports/revenue page does. Without this, Mark sees raw Xero
+// rows and reads HCP + SAH as TWO streams when they're the same program.
+export function streamOf(accountName: string): Stream | "Other" {
   const n = accountName.toLowerCase();
   // HCP = legacy Home Care Package; folded into SAH (Support at Home) — same
   // program, just renamed under the reform. Tony's rule.
