@@ -29,12 +29,24 @@ const FLEET_SCOPES = [
   "profile",
   "email",
   "offline_access", // gives us the refresh_token — without this we'd lose access in 30 min
-  "accounting.transactions.read",      // Rex (bank movements), Archie (bills), Vera (invoices), Monty (invoices)
-  "accounting.journals.read",          // Rex (GL journals), Flora (manual journals)
-  "accounting.contacts.read",          // every specialist (customer/supplier master)
-  "accounting.settings.read",          // chart of accounts, tax rates, currencies, branding
-  "accounting.reports.read",           // P&L, balance sheet, trial balance, bank summary, aged receivables
-  "accounting.attachments.read",       // for evidence packs
+  // Read-only access only — fleet never writes. Scope names below match Xero's
+  // exact identifiers (got these wrong earlier — there is NO accounting.transactions
+  // scope; bank movements live under accounting.banktransactions, GL/manual
+  // journals live under accounting.manualjournals).
+  "accounting.banktransactions.read",      // Rex — bank movements / unreconciled
+  "accounting.manualjournals.read",        // Rex (manual journals), Flora (audit)
+  "accounting.contacts.read",              // every specialist (customer/supplier master)
+  "accounting.settings.read",              // chart of accounts, tax rates, branding
+  "accounting.invoices.read",              // Monty, Vera, Archie
+  "accounting.payments.read",              // Monty (cash application), Archie (paid bills)
+  "accounting.attachments.read",           // evidence packs
+  "accounting.budgets.read",               // Vera (plan vs spend)
+  "accounting.reports.aged.read",          // Monty aged receivables / Archie aged payables
+  "accounting.reports.balancesheet.read",  // Dot, Mark
+  "accounting.reports.banksummary.read",   // Rex
+  "accounting.reports.profitandloss.read", // Mark, Dot
+  "accounting.reports.trialbalance.read",  // Dot (PAYG, super, payroll-tax clearing balances)
+  "accounting.reports.taxreports.read",    // Dot
 ];
 
 export function getXeroAppConfig(app: XeroAppKey): XeroAppConfig {
