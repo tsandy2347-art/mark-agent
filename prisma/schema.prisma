@@ -352,3 +352,36 @@ model PayrollMonth {
   @@unique([entityCode, month])
   @@index([entityCode, month])
 }
+
+/**
+ * XeroTenantToken — refresh tokens for the Xero connection, one row per
+ * (xeroApp, tenantId). Populated by the OAuth flow at /api/xero/connect and
+ * /api/xero/callback. The brain (jbc-hermes) reads from this table to make
+ * Xero calls on each detector run.
+ *
+ * `xeroApp` lets us hold multiple registered Xero apps simultaneously — e.g.
+ * "pulse" (Pulse-owned app, 5,000/day) alongside the legacy fleet app. The
+ * specialists can be pointed at whichever app we want them to use.
+ *
+ * Refresh tokens expire 60 days after last use. accessToken is also stored
+ * so the specialists don't all have to refresh on cold start — they refresh
+ * if accessToken is past expiresAt.
+ */
+model XeroTenantToken {
+  id            String   @id @default(cuid())
+  xeroApp       String   // logical name e.g. "pulse" | "legacy-fleet"
+  tenantId      String   // Xero org UUID
+  tenantName    String?  // friendly name e.g. "Just Better Care Sunshine Coast"
+  entityCode    String?  // "SC" | "CQ" — convenience mirror of tenantName
+  accessToken   String   // current access token (~30 min lifetime)
+  refreshToken  String   // refresh token (60-day rolling lifetime)
+  expiresAt     DateTime // when the access token expires
+  scope         String   // space-separated scopes granted
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+  lastRefreshAt DateTime?
+  lastUsedAt    DateTime?
+
+  @@unique([xeroApp, tenantId])
+  @@index([xeroApp])
+}
