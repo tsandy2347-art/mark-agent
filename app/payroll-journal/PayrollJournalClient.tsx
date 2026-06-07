@@ -60,6 +60,7 @@ export function PayrollJournalClient() {
   const [uploadId, setUploadId] = useState<string | null>(null);
   const [posting, setPosting] = useState(false);
   const [postResult, setPostResult] = useState<ParserResult | null>(null);
+  const [paygEmail, setPaygEmail] = useState<{ sent: boolean; skippedReason?: string } | null>(null);
   const [postError, setPostError] = useState<string | null>(null);
 
   const allPresent = files.summary && files.data && files.detail;
@@ -71,6 +72,7 @@ export function PayrollJournalClient() {
     setResult(null);
     setUploadId(null);
     setPostResult(null);
+    setPaygEmail(null);
     setPostError(null);
     try {
       const fd = new FormData();
@@ -94,6 +96,7 @@ export function PayrollJournalClient() {
     setPosting(true);
     setPostError(null);
     setPostResult(null);
+    setPaygEmail(null);
     try {
       const res = await fetch("/api/payroll-journal/post", {
         method: "POST",
@@ -103,6 +106,7 @@ export function PayrollJournalClient() {
       const json = await res.json();
       if (!res.ok || !json.ok) throw new Error(json.error || `HTTP ${res.status}`);
       setPostResult(json.result as ParserResult);
+      setPaygEmail((json.email as { sent: boolean; skippedReason?: string } | null) ?? null);
     } catch (e) {
       setPostError(e instanceof Error ? e.message : String(e));
     } finally {
@@ -116,6 +120,7 @@ export function PayrollJournalClient() {
     setError(null);
     setUploadId(null);
     setPostResult(null);
+    setPaygEmail(null);
     setPostError(null);
   }
 
@@ -256,6 +261,13 @@ export function PayrollJournalClient() {
               </div>
             );
           })}
+          {paygEmail && (
+            <div style={{ fontSize: 13, marginTop: 12, paddingTop: 10, borderTop: "1px solid var(--border, #1f2937)" }}>
+              {paygEmail.sent
+                ? "✓ PAYG email sent to tony.sandy@justbettercare.com"
+                : `PAYG email NOT sent: ${paygEmail.skippedReason ?? "unknown reason"}`}
+            </div>
+          )}
         </div>
       )}
     </main>

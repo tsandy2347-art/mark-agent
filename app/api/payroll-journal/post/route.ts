@@ -11,6 +11,7 @@
 import { NextResponse, type NextRequest } from "next/server";
 import { prisma } from "@/lib/prisma";
 import { env } from "@/lib/env";
+import { sendPaygEmail, type PaygSide } from "@/lib/payroll-payg-email";
 
 export const dynamic = "force-dynamic";
 export const maxDuration = 200;
@@ -77,5 +78,51 @@ export async function POST(req: NextRequest) {
     data: { posted: true, postedAt: new Date() },
   });
 
-  return NextResponse.json({ ok: true, result: json.result });
+  // ── PAYG email — fire-and-forget, never block the API response. ──
+  // Tony has been getting this email from jbc-compliance for months; the
+  // workflow's now on Mark so the email needs to come from here too.
+  let emailResult: { sent: boolean; skippedReason?: string } = { sent: false, skippedReason: "no SC/CQ posted result" };
+  try {
+    const r = json.result as {
+      meta?: { pay_period_from?: string; pay_period_to?: string; journal_date?: string; sc_runs?: string[]; cq_runs?: string[] };
+      sc?: { payg?: number; super_sg?: number; net_pay?: number; total_dr?: number } | null;
+      cq?: { payg?: number; super_sg?: number; net_pay?: number; total_dr?: number } | null;
+      posted?: {
+        sc?: { ManualJournalID?: string; xero_link?: string } | null;
+        cq?: { ManualJournalID?: string; xero_link?: string } | null;
+      };
+    };
+    const meta = r?.meta ?? {};
+    const buildSide = (
+      totals: { payg?: number; super_sg?: number; net_pay?: number; total_dr?: number } | null | undefined,
+      posted: { ManualJournalID?: string; xero_link?: string } | null | undefined,
+      runs: string[] | undefined,
+    ): PaygSide | null => {
+      if (!totals || !posted || !posted.ManualJournalID || !posted.xero_link) return null;
+      return {
+        payg: totals.payg ?? 0,
+        superSg: totals.super_sg ?? 0,
+        netPay: totals.net_pay ?? 0,
+        totalDr: totals.total_dr ?? 0,
+        journalId: posted.ManualJournalID,
+        xeroLink: posted.xero_link,
+        runs: runs ?? [],
+      };
+    };
+    const sc = buildSide(r?.sc ?? null, r?.posted?.sc ?? null, meta.sc_runs);
+    const cq = buildSide(r?.cq ?? null, r?.posted?.cq ?? null, meta.cq_runs);
+    if (sc || cq) {
+      emailResult = await sendPaygEmail({
+        payPeriodFrom: meta.pay_period_from ?? "",
+        payPeriodTo: meta.pay_period_to ?? "",
+        journalDate: meta.journal_date ?? "",
+        sc,
+        cq,
+      });
+    }
+  } catch (e) {
+    emailResult = { sent: false, skippedReason: e instanceof Error ? e.message : String(e) };
+  }
+
+  return NextResponse.json({ ok: true, result: json.result, email: emailResult });
 }

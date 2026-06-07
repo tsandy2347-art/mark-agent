@@ -34,7 +34,9 @@ interface Connection {
 function entityCodeFromName(name: string): string | null {
   const n = (name || "").toLowerCase();
   if (n.includes("sunshine coast")) return "SC";
-  if (n.includes("central queensland")) return "CQ";
+  // Xero shows the CQ entity as "Just Better Care CQ Pty Ltd" — match on the
+  // " cq " token (with spaces so we don't accidentally match e.g. "acquired").
+  if (n.includes("central queensland") || / cq /.test(` ${n} `) || n.includes("cq pty")) return "CQ";
   return null;
 }
 
