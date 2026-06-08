@@ -23,6 +23,7 @@ import { NextResponse, type NextRequest } from "next/server";
 import { headers } from "next/headers";
 import Anthropic from "@anthropic-ai/sdk";
 import { env } from "@/lib/env";
+import { findAccount, formatChartForPrompt, type Entity } from "@/lib/chart-of-accounts";
 
 export const dynamic = "force-dynamic";
 export const maxDuration = 90;
@@ -69,9 +70,10 @@ const PROPOSE_TOOL: Anthropic.Messages.Tool = {
             accountCode: {
               type: "string",
               description:
-                "JBC Xero account code as best you can infer (e.g. '6010' for wages, " +
-                "'2100' for PAYG payable). When unsure, pick a plausible code and " +
-                "note it in description so the human can correct.",
+                "JBC Xero account code. MUST be a code that appears in the chart " +
+                "of accounts block in the system prompt for this entity. Do not " +
+                "invent codes. If no chart account fits the line, set " +
+                "cannot_propose=true instead of guessing.",
             },
             description: {
               type: "string",
@@ -92,7 +94,7 @@ const PROPOSE_TOOL: Anthropic.Messages.Tool = {
   },
 };
 
-const PROPOSE_SYSTEM = `You are a senior accountant assisting JBC's finance team. You're shown a
+const PROPOSE_SYSTEM_BASE = `You are a senior accountant assisting JBC's finance team. You're shown a
 spreadsheet and asked to propose a single balanced manual journal that captures
 what the file represents.
 
@@ -105,14 +107,32 @@ Hard rules:
 - If the file isn't a journal source (it's a list of contacts, a marketing PDF,
   etc.), set cannot_propose=true with a plain-English reason. Don't force a
   proposal just to have one.
-- Account codes: pick the most plausible JBC account code from common chart
-  conventions (4xxx revenue, 5xxx COGS, 6xxx expenses, 1xxx assets, 2xxx
-  liabilities, 3xxx equity). If unsure, note it in the line description so the
-  human can correct before posting.
+- Account codes: use ONLY codes that appear in the entity's chart of accounts
+  block below. Do not invent codes; do not borrow codes across entities (SC and
+  CQ are separate Xero tenants with separate charts). If no listed account fits
+  a line, set cannot_propose=true with reason "no matching account code".
+- Tax codes: respect the (tax) hint next to each account — e.g. SAH/NDIS income
+  accounts are GST-free, wages and super are BAS-excluded, most expenses are
+  GST on Expenses. Flag in rationale if the file implies a different tax
+  treatment.
+- 877 Tracking Transfers is a clearing account used to net out tracking-category
+  splits in SC's books — don't use it casually; only when explicitly building
+  Craig's pattern (recon owns that build, not propose).
 - When the entity hint is "SC" the journal is for Just Better Care Sunshine
   Coast Pty Ltd; "CQ" is Just Better Care Central Queensland Pty Ltd. Keep the
   proposal entity-specific — don't mix.
 - Be conservative on rationale. If you're guessing on a line, say so.`;
+
+function buildSystemBlocks(entity: Entity): Anthropic.Messages.TextBlockParam[] {
+  return [
+    { type: "text", text: PROPOSE_SYSTEM_BASE },
+    {
+      type: "text",
+      text: formatChartForPrompt(entity),
+      cache_control: { type: "ephemeral" },
+    },
+  ];
+}
 
 interface ProposedLine {
   amount: number;
@@ -232,7 +252,7 @@ export async function POST(req: NextRequest) {
     resp = await client.messages.create({
       model: env.ANTHROPIC_MODEL,
       max_tokens: 2500,
-      system: PROPOSE_SYSTEM,
+      system: buildSystemBlocks(entity as Entity),
       tools: [PROPOSE_TOOL],
       tool_choice: { type: "tool", name: "propose_manual_journal" },
       messages: [
@@ -314,7 +334,23 @@ export async function POST(req: NextRequest) {
   const totalDr = lines.filter((l) => l.side === "DR").reduce((s, l) => s + l.amount, 0);
   const totalCr = lines.filter((l) => l.side === "CR").reduce((s, l) => s + l.amount, 0);
 
-  const proposal: Proposal & { totalDr: number; totalCr: number; balanced: boolean } = {
+  // Cross-check every code against the entity's chart. Codes not in the chart
+  // are surfaced so the UI can flag them — we don't drop the line (the human
+  // might correct it post-review) but we do refuse to mark the proposal
+  // "balanced" without a clean chart match.
+  const unknownCodes: string[] = [];
+  for (const l of lines) {
+    if (!findAccount(entity as Entity, l.accountCode)) {
+      unknownCodes.push(l.accountCode);
+    }
+  }
+
+  const proposal: Proposal & {
+    totalDr: number;
+    totalCr: number;
+    balanced: boolean;
+    unknownCodes: string[];
+  } = {
     narration,
     date,
     lines,
@@ -322,6 +358,7 @@ export async function POST(req: NextRequest) {
     totalDr,
     totalCr,
     balanced: Math.abs(totalDr - totalCr) <= 0.01,
+    unknownCodes,
   };
 
   return NextResponse.json({

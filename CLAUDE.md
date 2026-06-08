@@ -232,6 +232,42 @@ Mark replaces seven inboxes' worth of agent output with three clear reports.
 
 ---
 
+## 6e. Chart of accounts (durable reference, NOT Honcho)
+
+Mark's chart of accounts for SC + CQ lives in this repo, not in Honcho. Honcho
+is the deriver-built memory layer for cross-session facts about the user — it's
+not a reliable key/value store for authoritative reference data, so codes that
+must be exact (Xero account codes, tax treatments) live here:
+
+```
+data/chart-of-accounts/
+  sc.csv        # raw Xero export — Just Better Care Sunshine Coast Pty Ltd
+  cq.csv        # raw Xero export — Just Better Care Central Queensland Pty Ltd
+lib/
+  chart-of-accounts.ts            # typed accessors + formatChartForPrompt(entity)
+  chart-of-accounts.generated.ts  # auto-generated, do not edit
+scripts/
+  build-chart.ts                  # CSV → generated TS (npm run build:chart)
+```
+
+To refresh after a chart change in Xero: re-export the chart, replace the CSV
+in place, run `npm run build:chart`, commit both the CSV and the generated TS.
+The build filters out non-postable placeholder rows ("HP NAME1", "Ben 1
+Beneficiary", "DO NOT USE", template asset descriptions, etc.) so the prompt
+stays tight.
+
+The propose route (`app/api/journals/propose/route.ts`) injects the
+entity-specific block into the system prompt with `cache_control: ephemeral`
+so the per-entity chart caches across consecutive calls. The route also
+cross-checks every code the model returns against the chart and surfaces
+`unknownCodes` on the response so the UI can flag invented codes loudly.
+
+The payroll-journal build (recon-owned) does NOT need this — it uses the
+hard-coded Craig pattern codes (477/477.4/478/478.1/803/825/826/877). The
+chart matters for the free-form propose path.
+
+---
+
 ## 7. Configuration
 
 ```

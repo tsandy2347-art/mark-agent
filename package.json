@@ -16,6 +16,7 @@
     "seed": "tsx scripts/seed-entities.ts",
     "mark:poll": "tsx scripts/poll-once.ts",
     "mark:brief": "tsx scripts/build-brief.ts",
+    "build:chart": "tsx scripts/build-chart.ts",
     "postinstall": "prisma generate"
   },
   "dependencies": {
