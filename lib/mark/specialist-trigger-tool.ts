@@ -104,35 +104,39 @@ export async function executeTriggerSpecialistRunTool(
     };
   }
 
-  // Trigger the cron job on the brain by name via POST /api/jobs/run
-  const triggerUrl = `${brainUrl.replace(/\/+$/, "")}/api/jobs/run`;
+  // Look up the job ID by name, then trigger it
+  const listUrl = `${brainUrl.replace(/\/+$/, "")}/api/jobs`;
   const controller = new AbortController();
-  // Specialists can take up to 3 min. 4 min cap.
   const timer = setTimeout(() => controller.abort(), 4 * 60 * 1000);
 
   try {
-    const resp = await fetch(triggerUrl, {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${brainKey}`,
-        "Content-Type": "application/json",
-        Accept: "application/json",
-      },
-      body: JSON.stringify({ name: jobName }),
+    // Step 1: find the job ID
+    const listResp = await fetch(listUrl, {
+      headers: { Authorization: `Bearer ${brainKey}`, Accept: "application/json" },
       signal: controller.signal,
     });
+    if (!listResp.ok) {
+      return { ok: false, specialist, message: `Brain job list returned HTTP ${listResp.status}.` };
+    }
+    const listData = await listResp.json() as { jobs?: Array<{ id: string; name: string }> };
+    const job = (listData.jobs ?? []).find((j) => j.name === jobName);
+    if (!job) {
+      return { ok: false, specialist, message: `Brain has no cron job named '${jobName}'. It may need to be re-registered.` };
+    }
 
-    const text = await resp.text();
-    let parsed: unknown = undefined;
-    try { parsed = JSON.parse(text); } catch { parsed = text.slice(0, 500); }
+    // Step 2: trigger it via POST /api/jobs/<id>/run
+    const runUrl = `${brainUrl.replace(/\/+$/, "")}/api/jobs/${job.id}/run`;
+    const runResp = await fetch(runUrl, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${brainKey}`, Accept: "application/json" },
+      signal: controller.signal,
+    });
+    const runText = await runResp.text();
+    let parsed: unknown;
+    try { parsed = JSON.parse(runText); } catch { parsed = runText.slice(0, 500); }
 
-    if (!resp.ok) {
-      return {
-        ok: false,
-        specialist,
-        message: `${known.label}: brain returned HTTP ${resp.status} triggering '${jobName}'.`,
-        result: parsed,
-      };
+    if (!runResp.ok) {
+      return { ok: false, specialist, message: `${known.label}: brain returned HTTP ${runResp.status} triggering '${jobName}'.`, result: parsed };
     }
 
     return {
