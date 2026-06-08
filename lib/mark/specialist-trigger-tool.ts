@@ -1,15 +1,10 @@
 // In-chat tool — fire an on-demand re-run of one of Mark's seven specialists.
 //
-// Each specialist exposes POST /api/cron/run (Bearer <its-own-CRON_SECRET>).
-// That endpoint kicks off the same daily-cron flow the sidecar would have
-// fired at 07:00 AEST. Returns once the run completes (specialist-side
-// timing varies — recon is ~3-5s, controls-audit ~3min depending on Xero).
+// Specialists run as --no-agent cron scripts on the jbc-hermes brain (NOT as
+// standalone HTTP services). This tool triggers them via the brain's
+// POST /api/jobs/<job-name>/run endpoint, then polls for completion.
 //
-// Mark doesn't share a single Bearer with the specialists for /api/cron/run
-// (unlike /api/findings which uses HUB_API_KEY). Each specialist has its own
-// CRON_SECRET. Mark holds them as SPECIALIST_<AGENT>_CRON_SECRET env vars.
-// A specialist with no secret configured returns a clear "not wired" error
-// — the user (Tony) sees the gap and fills it in Railway.
+// Brain URL + API key are HERMES_API_URL + HERMES_API_SERVER_KEY on Mark.
 
 import Anthropic from "@anthropic-ai/sdk";
 import { env, specialists, type SpecialistAgent } from "../env";
@@ -29,8 +24,8 @@ export const TRIGGER_SPECIALIST_RUN_TOOL: Anthropic.Messages.Tool = {
     "immediately.\n\n" +
     "Do not call this tool more than once per specialist per chat turn — these " +
     "runs hit Xero / DB on the specialist side and burning quota is bad. If a " +
-    "specialist is not yet wired (no CRON_SECRET on Mark for it), the tool " +
-    "returns a clear error; relay it to the user, do NOT retry.",
+    "specialist is not yet wired, the tool returns a clear error; relay it to " +
+    "the user, do NOT retry.",
   input_schema: {
     type: "object",
     properties: {
@@ -54,6 +49,17 @@ export const TRIGGER_SPECIALIST_RUN_TOOL: Anthropic.Messages.Tool = {
   },
 };
 
+// Maps specialist agent names to their brain cron job names
+const SPECIALIST_TO_CRON_JOB: Record<string, string> = {
+  "reconciliation":  "jbc-reconciliation-daily",
+  "controls-audit":  "jbc-controls-audit-daily",
+  "payroll-labour":  "jbc-payroll-labour-daily",
+  "payables":        "jbc-payables-detector-daily",
+  "revenue-claims":  "jbc-revenue-claims-daily",
+  "receivables":     "jbc-receivables-daily",
+  "tax-compliance":  "jbc-tax-compliance-daily",
+};
+
 interface TriggerToolInput {
   specialist?: unknown;
 }
@@ -62,14 +68,7 @@ export interface TriggerToolResult {
   ok: boolean;
   specialist: string;
   message: string;
-  /** Free-form structured result from the specialist when available — counts,
-   *  IDs, severity buckets. Mark relays the headline numbers verbatim. */
   result?: unknown;
-}
-
-function _secretFor(agent: SpecialistAgent): string {
-  const key = `SPECIALIST_${agent.replace(/-/g, "_").toUpperCase()}_CRON_SECRET`;
-  return process.env[key] ?? "";
 }
 
 export async function executeTriggerSpecialistRunTool(
@@ -84,61 +83,62 @@ export async function executeTriggerSpecialistRunTool(
       message: `Unknown specialist '${specialist}'. Valid: ${specialists().map((s) => s.agent).join(", ")}.`,
     };
   }
-  if (!known.url) {
+
+  const jobName = SPECIALIST_TO_CRON_JOB[specialist];
+  if (!jobName) {
     return {
       ok: false,
       specialist,
-      message: `${known.label}: no URL configured on Mark — SPECIALIST_${specialist.replace(/-/g, "_").toUpperCase()}_URL is blank.`,
-    };
-  }
-  const secret = _secretFor(specialist as SpecialistAgent);
-  if (!secret) {
-    return {
-      ok: false,
-      specialist,
-      message:
-        `${known.label}: no CRON_SECRET configured on Mark — set ` +
-        `SPECIALIST_${specialist.replace(/-/g, "_").toUpperCase()}_CRON_SECRET ` +
-        `to the value of CRON_SECRET on the ${specialist} service. Until then ` +
-        `I can't trigger this one on-demand; it will still run on its daily cron.`,
+      message: `${known.label}: no brain cron job name mapped for '${specialist}'.`,
     };
   }
 
-  const url = `${known.url.replace(/\/+$/, "")}/api/cron/run`;
+  const brainUrl = process.env.HERMES_API_URL ?? "https://jbc-hermes-production.up.railway.app";
+  const brainKey = process.env.HERMES_API_SERVER_KEY ?? "";
+
+  if (!brainKey) {
+    return {
+      ok: false,
+      specialist,
+      message: `HERMES_API_SERVER_KEY not set on Mark — cannot trigger brain job.`,
+    };
+  }
+
+  // Trigger the cron job on the brain by name via POST /api/jobs/run
+  const triggerUrl = `${brainUrl.replace(/\/+$/, "")}/api/jobs/run`;
   const controller = new AbortController();
-  // Specialists are slow (controls-audit can be ~3 min). 4 min cap so we
-  // still return inside Mark's chat window.
+  // Specialists can take up to 3 min. 4 min cap.
   const timer = setTimeout(() => controller.abort(), 4 * 60 * 1000);
 
   try {
-    const resp = await fetch(url, {
+    const resp = await fetch(triggerUrl, {
       method: "POST",
       headers: {
-        Authorization: `Bearer ${secret}`,
+        Authorization: `Bearer ${brainKey}`,
+        "Content-Type": "application/json",
         Accept: "application/json",
       },
+      body: JSON.stringify({ name: jobName }),
       signal: controller.signal,
     });
+
     const text = await resp.text();
     let parsed: unknown = undefined;
-    try {
-      parsed = JSON.parse(text);
-    } catch {
-      parsed = text.slice(0, 500);
-    }
+    try { parsed = JSON.parse(text); } catch { parsed = text.slice(0, 500); }
 
     if (!resp.ok) {
       return {
         ok: false,
         specialist,
-        message: `${known.label} returned HTTP ${resp.status}.`,
+        message: `${known.label}: brain returned HTTP ${resp.status} triggering '${jobName}'.`,
         result: parsed,
       };
     }
+
     return {
       ok: true,
       specialist,
-      message: `${known.label} re-run complete.`,
+      message: `${known.label} re-run triggered on brain (job: ${jobName}). Results will appear on the next poll cycle.`,
       result: parsed,
     };
   } catch (e) {
@@ -147,8 +147,8 @@ export async function executeTriggerSpecialistRunTool(
       ok: false,
       specialist,
       message: isAbort
-        ? `${known.label} did not respond within 4 min — the run may still finish; check back via /api/findings on the next poll.`
-        : `${known.label} request failed: ${(e as Error).message}`,
+        ? `${known.label} brain trigger timed out — the run may still complete; check back on the next poll.`
+        : `${known.label} brain trigger failed: ${(e as Error).message}`,
     };
   } finally {
     clearTimeout(timer);
