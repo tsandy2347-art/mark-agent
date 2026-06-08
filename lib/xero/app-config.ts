@@ -14,7 +14,7 @@
 // Scopes are the union of what the seven specialists need. Read-only —
 // every "accounting.*" scope here is .read.
 
-export type XeroAppKey = "pulse" | "legacy-fleet";
+export type XeroAppKey = "pulse" | "legacy-fleet" | "rex";
 
 export interface XeroAppConfig {
   key: XeroAppKey;
@@ -49,6 +49,16 @@ const FLEET_SCOPES = [
   "accounting.reports.taxreports.read",    // Dot
 ];
 
+const REX_SCOPES = [
+  "openid",
+  "profile",
+  "email",
+  "offline_access",
+  "accounting.transactions",  // read + write bank transactions
+  "accounting.contacts.read", // look up contacts/invoices
+  "accounting.settings.read", // chart of accounts
+];
+
 export function getXeroAppConfig(app: XeroAppKey): XeroAppConfig {
   const upper = app.toUpperCase().replace("-", "_");
   const clientId = process.env[`XERO_${upper}_CLIENT_ID`];
@@ -63,11 +73,13 @@ export function getXeroAppConfig(app: XeroAppKey): XeroAppConfig {
     throw new Error(`Missing env: ${missing.join(", ")}`);
   }
 
+  const scopes = app === "rex" ? REX_SCOPES : FLEET_SCOPES;
+
   return {
     key: app,
     clientId: clientId!,
     clientSecret: clientSecret!,
     redirectUri: redirectUri!,
-    scopes: FLEET_SCOPES,
+    scopes,
   };
 }
