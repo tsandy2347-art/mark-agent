@@ -133,6 +133,9 @@ async function buildBriefInner(briefType: BriefType): Promise<BriefResult> {
         "This is the DAILY brief. Recipients: Tony and Nicole.",
         "Lead with the single most important thing.",
         "Then: cash position both entities, then today's items (correlated, prioritised), then anything for this week.",
+        "Always include a section titled 'Controls & Audit (Xero ↔ Compliance)'.",
+        "In that section, list every itemsForAction whose sourceAgents includes 'controls-audit' — one line each with title, entityCode, and short detail.",
+        "If none have 'controls-audit' in sourceAgents, write exactly this single line under the section: 'No findings today — all Xero bills reconciled against compliance tickets, supplier compliance current, vendor master-data and bank-detail changes clean.'",
         "End with one line per silent specialist if any.",
         "Restricted items are referenced only as a count — never name people or quote individual pay.",
       ].join(" ");
