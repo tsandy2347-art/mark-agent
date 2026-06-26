@@ -80,12 +80,12 @@ export async function askMark(input: AskInput): Promise<AskOutput> {
   // Load a lighter slice for voice (fewer findings, shorter bodies) so the
   // pre-model data fetch + prompt stay small. Browser chat keeps the full depth.
   const isVoice = Boolean(input.voiceMode);
-  const findingsLimit = isVoice ? 100 : 400;
+  const findingsLimit = isVoice ? 60 : 400;
   // Per-agent cap = total / 7 specialists (rounded up), so a single noisy
   // specialist (e.g. Monty's hundreds of overdue invoices) can't crowd Dot,
   // Vera, Flora et al. out of Mark's view entirely.
-  const perAgentCap = isVoice ? 15 : 80;
-  const findingsBodyCap = isVoice ? 600 : 2500;
+  const perAgentCap = isVoice ? 10 : 80;
+  const findingsBodyCap = isVoice ? 350 : 2500;
 
   const __td = Date.now();
   const [findings, rollup, metrics, statuses, memory, financials, payrollMonths] = await Promise.all([
@@ -103,7 +103,7 @@ export async function askMark(input: AskInput): Promise<AskOutput> {
     // beats the data load it costs nothing; if it doesn't, we drop it and Mark
     // stays memory-less for that turn rather than blocking his reply.
     input.sessionId
-      ? fetchMarkMemory({ sessionId: input.sessionId, userPeer, timeoutMs: isVoice ? 2800 : undefined })
+      ? fetchMarkMemory({ sessionId: input.sessionId, userPeer, timeoutMs: isVoice ? 1500 : undefined })
       : Promise.resolve({ resume: [], memoryBlock: null, disabled: true, errored: false }),
     // P&L per entity. DB-first: stored closed months (zero Xero calls) plus
     // ONLY the live current month (1 call/entity, cached). Lets Mark answer

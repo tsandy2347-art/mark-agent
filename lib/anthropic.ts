@@ -982,13 +982,32 @@ export async function answerQuestion(input: QaInput): Promise<QaOutput> {
       : `=== CURRENT WALL-CLOCK TIME (system-provided this turn — AUTHORITATIVE) ===\n` +
         `It is currently ${brisbane(now)} in Brisbane.\n` +
         `If asked the time, day, or date, answer with this directly. You DO have the clock.\n\n`;
-    // On voice, surgically remove the two persona lines that mandate the
-    // "Data as of <timestamp>" footer. Belt-and-braces — the voice overlay
-    // also tells him not to say it.
+    // On voice, surgically remove sections that are irrelevant or actively
+    // harmful to voice latency (large blocks of write-tool docs, memory-mgmt
+    // instructions, "Data as of" footer rules). Each strip shaves KB off the
+    // prompt, which directly reduces time-to-first-token on Sonnet 4.6.
     const voiceCleaned = input.voiceMode
       ? baseSystem
+          // Footer rules (belt-and-braces — voice overlay covers this too)
           .replace(/Always end with "Data as of <Brisbane timestamp>"\./g, "")
           .replace(/- The "Data as of" footer is the only thing that's required on every turn —\s*\n\s*everything else should be NEW content responsive to the latest question\./g, "")
+          // Draft journal tool documentation (~5KB) — write tools are disabled
+          // on voice (no confirmation flow possible on a phone call).
+          .replace(
+            /THE ONE NARROW EXCEPTION — DRAFT MANUAL JOURNALS:[\s\S]*?Hard rule: never call the tool without a clear affirmative from[\s\S]*?No "I assumed you wanted me to"\.\s*\n/,
+            "   Write tools (draft journals, payroll journals) are disabled on voice — no confirmation flow possible on a phone call.\n",
+          )
+          // Payroll journal tool docs (~3KB) — same reason
+          .replace(
+            /─── JBC PAYROLL JOURNALS — second tool: create_payroll_journal ───[\s\S]*?Hard rules same as the simple-draft tool: never call without explicit[\s\S]*?recon and you cannot escalate\.\s*\n/,
+            "",
+          )
+          // Cross-session memory / skill-manage instructions (~1.5KB) —
+          // irrelevant on a phone call where Tony just wants a quick answer.
+          .replace(
+            /LEARNING ACROSS CONVERSATIONS \(durable memory \+ skills\):[\s\S]*?knowledge vs answering from today's data\./,
+            "",
+          )
       : baseSystem;
     const systemPrompt = nowHeader + (input.voiceMode ? `${voiceCleaned}${MARK_VOICE_OVERLAY}` : baseSystem);
 
