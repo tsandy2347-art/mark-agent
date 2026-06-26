@@ -75,8 +75,12 @@ export function correlateFindings(findings: IngestedFinding[]): CorrelationCandi
       // conflict.ts. Critical/warning rows without an identifier survive as
       // singletons so we don't lose them.
       if (f.severity === "info") continue;
-      const k = `singleton::${f.specialistAgent}::${f.specialistFindingId}`;
-      groups.set(k, [f]);
+      // Dedupe singletons by (agent, entityCode, title) so the same issue
+      // written on multiple runs doesn't inflate the count. We keep the
+      // most-recent finding (findings are ordered by at desc) and discard
+      // older duplicates — they're the same issue, not new ones.
+      const k = `singleton::${f.specialistAgent}::${f.entityCode}::${f.title.trim().slice(0, 120)}`;
+      if (!groups.has(k)) groups.set(k, [f]);
       continue;
     }
     // Use the first identifier as the canonical group, but also alias the
