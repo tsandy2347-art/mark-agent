@@ -19,6 +19,7 @@ const BYPASS_PREFIXES = [
   "/api/healthz",
   "/api/cron/",
   "/api/voice/", // Vapi Custom-LLM — self-authed via Bearer VOICE_API_KEY
+  "/api/ops-snapshot", // MARK wall dashboard — self-authed via Bearer MARK_DASHBOARD_TOKEN
   "/api/xero/callback", // Xero OAuth redirects here — must be publicly reachable
   "/_next/",
   "/favicon",
