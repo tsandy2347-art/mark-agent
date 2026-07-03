@@ -24,6 +24,7 @@ import { detectConflicts } from "./conflict";
 import { captureGoalMetrics, readLatestMetrics, type CapturedMetric } from "./goals";
 import { synthesiseBrief } from "../anthropic";
 import { sendChannelEmail, type Channel, sendHeartbeatFailure } from "../email";
+import { hermesConfigured, listOpenFindingsForQa, type HermesFinding } from "../hermes-findings";
 import type { IngestedFinding, SpecialistRunStatus } from "../generated/prisma";
 
 export type BriefType = "daily" | "restricted" | "weekly" | "monthly";
@@ -52,13 +53,13 @@ async function buildBriefInner(briefType: BriefType): Promise<BriefResult> {
   const now = new Date();
   const dataAsOf = brisbane(now);
 
-  // ── Pull what we need from local cache (no specialist polling here). ──
+  // ── Pull open findings from the live source. ──
+  // Since the specialist-service teardown, detectors write to the shared
+  // hermes findings DB — that is the live path. The local IngestedFinding
+  // mirror stopped receiving rows on 2026-05-29 and is only a fallback for
+  // environments without HERMES_FINDINGS_DATABASE_URL.
   const [openFindings, statuses, latestMetrics] = await Promise.all([
-    prisma.ingestedFinding.findMany({
-      where: { resolved: false },
-      orderBy: [{ severity: "asc" }, { at: "desc" }],
-      take: 1500,
-    }),
+    fetchOpenFindings(),
     prisma.specialistRunStatus.findMany(),
     readLatestMetrics(),
   ]);
@@ -71,7 +72,18 @@ async function buildBriefInner(briefType: BriefType): Promise<BriefResult> {
   let candidates = correlateFindings(openFindings);
   const conflictRes = detectConflicts(candidates, openFindings);
   candidates = conflictRes.candidates;
-  const prioritised = prioritiseAll(candidates);
+  // Stale-honesty: a finding's own date governs how it is presented. An item
+  // whose newest evidence is older than these thresholds cannot claim the
+  // "today" slot — it is long-outstanding, not breaking news.
+  const prioritised = prioritiseAll(candidates).map((c) => {
+    const newestMs = Math.max(...c.findings.map((f) => f.at.getTime()));
+    const oldestMs = Math.min(...c.findings.map((f) => f.at.getTime()));
+    const ageDays = Math.floor((now.getTime() - newestMs) / 86_400_000);
+    let priority = c.priority;
+    if (ageDays > STALE_NOTE_DAYS) priority = "note" as const;
+    else if (ageDays > STALE_DEMOTE_DAYS && priority === "today") priority = "this-week" as const;
+    return { ...c, priority, ageDays, firstRaised: brisbaneDate(new Date(oldestMs)) };
+  });
 
   // ── Specialist health → silent agents become their own item. ──
   const staleAgents = statuses
@@ -118,6 +130,8 @@ async function buildBriefInner(briefType: BriefType): Promise<BriefResult> {
       sourceAgents: c.sourceAgents,
       isConflict: c.isConflict,
       isRestricted: c.isRestricted,
+      firstRaised: c.firstRaised,
+      ageDays: c.ageDays,
     })),
     restrictedItemSummary: isRestricted
       ? null
@@ -127,7 +141,7 @@ async function buildBriefInner(briefType: BriefType): Promise<BriefResult> {
     profitTarget: env.GOAL_PROFIT_TARGET_AUD,
   };
 
-  const extraInstructions = (() => {
+  const perTypeInstructions = (() => {
     if (briefType === "daily") {
       return [
         "This is the DAILY brief. Recipients: Tony and Nicole.",
@@ -162,6 +176,17 @@ async function buildBriefInner(briefType: BriefType): Promise<BriefResult> {
     ].join(" ");
   })();
 
+  // Non-negotiable honesty rules, appended to every brief type.
+  const extraInstructions = [
+    perTypeInstructions,
+    "Every item carries firstRaised and ageDays.",
+    "Anything with ageDays > 7 is LONG-OUTSTANDING — present it as 'open since <firstRaised>', never as new and never as today's discovery.",
+    "specialistHealth.lastRunAt is when a detector last ran; it says nothing about how fresh a finding is. Never imply an item is fresh because its agent ran recently, and never invent run times.",
+    "If a figure is arithmetically implausible (a ratio above 300%, a credit-card balance described as 'overdrawn', a revenue denominator smaller than one day of payroll), say it looks like a data artifact, name the specific check needed, and do not headline it as an operating result.",
+    "If most items are long-outstanding, the headline must say so — do not manufacture urgency from a stale backlog.",
+    "Craig has left JBC (May 2026) — never assign an action or escalation to Craig.",
+  ].join(" ");
+
   const synthesis = await synthesiseBrief({
     briefType,
     entityScope: briefType === "weekly" || briefType === "monthly" ? "consolidated" : "consolidated",
@@ -192,6 +217,8 @@ async function buildBriefInner(briefType: BriefType): Promise<BriefResult> {
         isConflict: c.isConflict,
         isRestricted: c.isRestricted,
         sourceExceptionIds: c.sourceExceptionIds,
+        firstRaised: c.firstRaised,
+        ageDays: c.ageDays,
       })) as unknown as object,
     },
   });
@@ -296,24 +323,84 @@ function routing(briefType: BriefType, headline: string): { channel: Channel; to
   }
 }
 
-function recentCashByEntity(findings: IngestedFinding[]): Record<string, number | null> {
-  const out: Record<string, number | null> = { SC: null, CQ: null };
+interface CashPoint {
+  amount: number | null;
+  /** Brisbane date the recon finding carrying this number was created —
+   *  surfaced so a week-old cash figure can never masquerade as today's. */
+  asOf: string | null;
+}
+
+function recentCashByEntity(findings: IngestedFinding[]): Record<"SC" | "CQ", CashPoint> {
+  const out: Record<"SC" | "CQ", CashPoint> = {
+    SC: { amount: null, asOf: null },
+    CQ: { amount: null, asOf: null },
+  };
   const candidates = findings.filter(
     (f) => f.specialistAgent === "reconciliation" && /cash-?position/i.test(f.detector),
   );
   const sorted = [...candidates].sort((a, b) => b.at.getTime() - a.at.getTime());
   for (const f of sorted) {
-    if (f.entityCode === "SC" && out.SC == null && f.amount != null) out.SC = Number(f.amount);
-    if (f.entityCode === "CQ" && out.CQ == null && f.amount != null) out.CQ = Number(f.amount);
+    if (f.entityCode === "SC" && out.SC.amount == null && f.amount != null) {
+      out.SC = { amount: Number(f.amount), asOf: brisbaneDate(f.at) };
+    }
+    if (f.entityCode === "CQ" && out.CQ.amount == null && f.amount != null) {
+      out.CQ = { amount: Number(f.amount), asOf: brisbaneDate(f.at) };
+    }
   }
   return out;
+}
+
+// ── Live findings source ─────────────────────────────────────────
+
+/** Items older than this can't claim "NEEDS YOU TODAY". */
+const STALE_DEMOTE_DAYS = 7;
+/** Items older than this drop to the notes section. */
+const STALE_NOTE_DAYS = 21;
+
+async function fetchOpenFindings(): Promise<IngestedFinding[]> {
+  if (hermesConfigured()) {
+    const rows = await listOpenFindingsForQa({ includePeopleFlag: true, limit: 800, perAgentCap: 120 });
+    return rows.map(hermesToFinding);
+  }
+  return prisma.ingestedFinding.findMany({
+    where: { resolved: false },
+    orderBy: [{ severity: "asc" }, { at: "desc" }],
+    take: 1500,
+  });
+}
+
+/** Shape a shared-DB finding like the legacy IngestedFinding rows the
+ *  correlate/prioritise/conflict pipeline was written against. Consumers
+ *  only read fields (never Prisma methods), and `amount` is only ever used
+ *  via Number(f.amount), so a plain number stands in for the Decimal. */
+function hermesToFinding(f: HermesFinding): IngestedFinding {
+  return {
+    id: f.id,
+    specialistAgent: f.sourceAgent,
+    specialistFindingId: f.id,
+    at: f.createdAt,
+    severity: f.severity,
+    isPeopleFlag: f.isPeopleFlag,
+    entityCode: f.entityCode,
+    domain: f.domain,
+    detector: f.detector,
+    title: f.title,
+    body: f.detail,
+    explanation: f.aiExplanation,
+    evidenceJson: (f.evidence ?? {}) as IngestedFinding["evidenceJson"],
+    amount: f.amount as unknown as IngestedFinding["amount"],
+    suggestedAction: "",
+    resolved: f.resolved,
+    ingestedAt: f.createdAt,
+    updatedAt: f.createdAt,
+  } as IngestedFinding;
 }
 
 interface RenderEmailBodyArgs {
   headline: string;
   narrative: string;
   dataAsOf: string;
-  cashByEntity: Record<string, number | null>;
+  cashByEntity: Record<"SC" | "CQ", CashPoint>;
   goalMetrics: CapturedMetric[];
   items: Array<{
     title: string;
@@ -323,6 +410,8 @@ interface RenderEmailBodyArgs {
     entityCode: string;
     sourceAgents: string[];
     isConflict: boolean;
+    ageDays: number;
+    firstRaised: string;
   }>;
   staleAgents: Array<{ agent: string; status: string; lastRunAt: string; error: string | null }>;
   /** When set, append a one-liner reference (non-restricted briefs only). */
@@ -337,8 +426,14 @@ function renderEmailBody(a: RenderEmailBodyArgs): string {
   lines.push("");
   lines.push("─────────────────────────────────────────────");
   lines.push("CASH POSITION");
-  lines.push(`  SC: ${a.cashByEntity.SC == null ? "(no data)" : `$${a.cashByEntity.SC.toLocaleString("en-AU", { maximumFractionDigits: 0 })}`}`);
-  lines.push(`  CQ: ${a.cashByEntity.CQ == null ? "(no data)" : `$${a.cashByEntity.CQ.toLocaleString("en-AU", { maximumFractionDigits: 0 })}`}`);
+  for (const ent of ["SC", "CQ"] as const) {
+    const cp = a.cashByEntity[ent];
+    lines.push(
+      `  ${ent}: ${cp.amount == null
+        ? "(no data)"
+        : `$${cp.amount.toLocaleString("en-AU", { maximumFractionDigits: 0 })}${cp.asOf ? ` (as of ${cp.asOf})` : ""}`}`,
+    );
+  }
   lines.push("");
 
   const today = a.items.filter((i) => i.priority === "today");
@@ -359,14 +454,16 @@ function renderEmailBody(a: RenderEmailBodyArgs): string {
     lines.push(`THIS WEEK (${week.length}):`);
     for (const it of week) {
       const amt = it.amount != null ? ` — $${Math.round(Math.abs(it.amount)).toLocaleString("en-AU")}` : "";
-      lines.push(`  • [${it.entityCode}] ${it.title}${amt}`);
+      const aged = it.ageDays > 7 ? ` (open since ${it.firstRaised})` : "";
+      lines.push(`  • [${it.entityCode}] ${it.title}${amt}${aged}`);
     }
     lines.push("");
   }
   if (notes.length > 0) {
     lines.push(`NOTES (${notes.length}):`);
     for (const it of notes.slice(0, 12)) {
-      lines.push(`  • [${it.entityCode}] ${it.title}`);
+      const aged = it.ageDays > 7 ? ` (open since ${it.firstRaised})` : "";
+      lines.push(`  • [${it.entityCode}] ${it.title}${aged}`);
     }
     if (notes.length > 12) lines.push(`  ... ${notes.length - 12} more`);
     lines.push("");
