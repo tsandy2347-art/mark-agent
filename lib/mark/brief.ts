@@ -149,9 +149,23 @@ async function buildBriefInner(briefType: BriefType, dryRun: boolean): Promise<B
       return true;
     });
 
-  const itemsToday = items.filter((c) => c.priority === "today");
-  const itemsThisWeek = items.filter((c) => c.priority === "this-week");
-  const itemsNote = items.filter((c) => c.priority === "note");
+  // Nicole chases debtors by name. The shared findings DB keeps titles
+  // name-light (masked refs like JB-2c62), so the real contactName from
+  // evidence is surfaced ONLY in the recon-ar brief — other briefs and
+  // downstream surfaces stay name-light.
+  const displayItems =
+    briefType === "recon-ar"
+      ? items.map((c) => {
+          const ev = c.findings[0]?.evidenceJson;
+          const name = ev && typeof ev === "object" ? (ev as Record<string, unknown>).contactName : null;
+          if (typeof name !== "string" || !name || name === "(unknown)" || c.title.includes(name)) return c;
+          return { ...c, title: `${c.title} — ${name}`, detail: `${c.detail}\nDebtor: ${name}` };
+        })
+      : items;
+
+  const itemsToday = displayItems.filter((c) => c.priority === "today");
+  const itemsThisWeek = displayItems.filter((c) => c.priority === "this-week");
+  const itemsNote = displayItems.filter((c) => c.priority === "note");
   const restrictedTotal = prioritised.filter((c) => c.isRestricted).length;
 
   // Cash position both entities — pull most recent recon "cash-position" row.
@@ -176,7 +190,7 @@ async function buildBriefInner(briefType: BriefType, dryRun: boolean): Promise<B
       exceptionsOpen: s.exceptionsOpen,
       error: s.lastError,
     })),
-    itemsForAction: items.map((c) => ({
+    itemsForAction: displayItems.map((c) => ({
       priority: c.priority,
       title: c.title,
       detail: c.detail,
@@ -220,6 +234,7 @@ async function buildBriefInner(briefType: BriefType, dryRun: boolean): Promise<B
         "Section 1 — Reconciliation: genuinely overdrawn bank accounts, feed gaps / unavailable balances, unposted and late journals, intercompany issues. Credit-card liability balances are NOT overdrawn accounts.",
         "Section 2 — Receivables, in this exact priority order (see arPolicy): (1) THE 61-90 DAY BUCKET IS ALWAYS THE TOP PRIORITY — these invoices only get paid if we chase them; list every one (policyTag priority-61-90), grouped by debtor, with amounts and a concrete follow-up action each; the goal is this bucket empties and NOTHING crosses 90. (2) Invoices that CREPT past 90 in the last 7 days (policyTag crept-past-90) are process failures — flag each one explicitly. (3) The standing 90+ backlog appears as one aggregate line per entity (policyTag backlog-90-plus) — it needs a working session where every invoice gets a payment plan or a write-off recommendation to Tony; do not itemise it. Then debtor exposure breaches.",
         "Receivables findings do not yet carry a funding-type tag. Where a debtor reference clearly looks NDIS (NDIA or a plan manager), note it as likely NDIS — those are handled separately — rather than assigning Nicole the chase.",
+        "Item titles include the debtor's real name where known (appended after the masked ref like JB-2c62). Refer to debtors BY NAME — the masked ref is only a cross-reference key. If an item has no name, say so and give the invoice number to look up.",
         "Keep it to what Nicole can act on this week. No profit or margin figures.",
       ].join(" ");
     }
@@ -275,7 +290,7 @@ async function buildBriefInner(briefType: BriefType, dryRun: boolean): Promise<B
       dataAsOf,
       cashByEntity,
       goalMetrics: scopedMetrics,
-      items,
+      items: displayItems,
       staleAgents,
       restrictedTotalSummary: isRestricted ? null : restrictedTotal,
     });
@@ -307,7 +322,7 @@ async function buildBriefInner(briefType: BriefType, dryRun: boolean): Promise<B
         lastRunStatus: s.lastRunStatus,
         exceptionsOpen: s.exceptionsOpen,
       })) as unknown as object,
-      itemsForAction: items.map((c) => ({
+      itemsForAction: displayItems.map((c) => ({
         title: c.title,
         priority: c.priority,
         amount: c.amount,
@@ -323,7 +338,7 @@ async function buildBriefInner(briefType: BriefType, dryRun: boolean): Promise<B
     },
   });
 
-  for (const c of items) {
+  for (const c of displayItems) {
     await prisma.correlatedIssue.create({
       data: {
         briefId: brief.id,
@@ -348,7 +363,7 @@ async function buildBriefInner(briefType: BriefType, dryRun: boolean): Promise<B
     dataAsOf,
     cashByEntity,
     goalMetrics: scopedMetrics,
-    items,
+    items: displayItems,
     staleAgents,
     restrictedTotalSummary: isRestricted ? null : restrictedTotal,
   });
