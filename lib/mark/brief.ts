@@ -43,18 +43,22 @@ export interface BriefResult {
   restrictedCount: number;
   staleSpecialistsCount: number;
   delivered: boolean;
+  /** Populated only on dryRun — the email exactly as it would have sent. */
+  subject?: string;
+  bodyText?: string;
+  wouldSendTo?: string[];
 }
 
-export async function buildBrief(briefType: BriefType): Promise<BriefResult> {
+export async function buildBrief(briefType: BriefType, opts?: { dryRun?: boolean }): Promise<BriefResult> {
   try {
-    return await buildBriefInner(briefType);
+    return await buildBriefInner(briefType, opts?.dryRun ?? false);
   } catch (e) {
     await sendHeartbeatFailure(e, `build-${briefType}-brief`).catch(() => undefined);
     throw e;
   }
 }
 
-async function buildBriefInner(briefType: BriefType): Promise<BriefResult> {
+async function buildBriefInner(briefType: BriefType, dryRun: boolean): Promise<BriefResult> {
   const now = new Date();
   const dataAsOf = brisbane(now);
 
@@ -70,8 +74,9 @@ async function buildBriefInner(briefType: BriefType): Promise<BriefResult> {
   ]);
 
   // Capture any new goal-metric data the recent findings carry. (Idempotent
-  // append-only — captures one row per goal input seen this run.)
-  await captureGoalMetrics(openFindings).catch(() => undefined);
+  // append-only — captures one row per goal input seen this run.) Skipped on
+  // dryRun: previews must not write anything.
+  if (!dryRun) await captureGoalMetrics(openFindings).catch(() => undefined);
 
   // ── Correlate + prioritise + conflict-detect. ──
   let candidates = correlateFindings(openFindings);
@@ -237,6 +242,34 @@ async function buildBriefInner(briefType: BriefType): Promise<BriefResult> {
     data: synthesisPayload,
     extraInstructions,
   });
+
+  // ── Dry-run: render the email and stop — no persistence, no send. ──
+  if (dryRun) {
+    const { to: dryTo, subject: drySubject } = routing(briefType, synthesis.headline);
+    const dryBody = renderEmailBody({
+      headline: synthesis.headline,
+      narrative: synthesis.narrative,
+      dataAsOf,
+      cashByEntity,
+      goalMetrics: scopedMetrics,
+      items,
+      staleAgents,
+      restrictedTotalSummary: isRestricted ? null : restrictedTotal,
+    });
+    return {
+      briefId: "(dry-run)",
+      briefType,
+      itemsTodayCount: itemsToday.length,
+      itemsThisWeekCount: itemsThisWeek.length,
+      notesCount: itemsNote.length,
+      restrictedCount: restrictedTotal,
+      staleSpecialistsCount: staleAgents.length,
+      delivered: false,
+      subject: drySubject,
+      bodyText: dryBody,
+      wouldSendTo: dryTo,
+    };
+  }
 
   // ── Persist the brief row + correlated issues. ──
   const brief = await prisma.financeBrief.create({
