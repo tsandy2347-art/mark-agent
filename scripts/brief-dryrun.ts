@@ -18,11 +18,22 @@ async function main() {
   const prioritised = prioritiseAll(correlateFindings(findings)).map((c) => {
     const newestMs = Math.max(...c.findings.map((f) => f.at.getTime()));
     const oldestMs = Math.min(...c.findings.map((f) => f.at.getTime()));
+    const lastSeenMs = Math.max(...c.findings.map((f) => {
+      const ev = f.evidenceJson;
+      const runAt = ev && typeof ev === "object" ? (ev as Record<string, unknown>).runAt : null;
+      const t = typeof runAt === "string" ? Date.parse(runAt) : NaN;
+      return Number.isFinite(t) ? t : f.at.getTime();
+    }));
     const ageDays = Math.floor((now.getTime() - newestMs) / 86_400_000);
+    const freshDays = Math.floor((now.getTime() - lastSeenMs) / 86_400_000);
     let priority = c.priority;
     if (ageDays > STALE_NOTE_DAYS) priority = "note" as const;
     else if (ageDays > STALE_DEMOTE_DAYS && priority === "today") priority = "this-week" as const;
-    return { ...c, priority, ageDays, firstRaised: new Date(oldestMs).toISOString().slice(0, 10) };
+    return {
+      ...c, priority, ageDays, freshDays,
+      firstRaised: new Date(oldestMs).toISOString().slice(0, 10),
+      lastSeen: new Date(lastSeenMs).toISOString().slice(0, 10),
+    };
   });
 
   const { candidates: policyApplied, arPolicy } = applyReceivablesPolicy(prioritised, "dry-run");

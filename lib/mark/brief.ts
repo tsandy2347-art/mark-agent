@@ -88,11 +88,30 @@ async function buildBriefInner(briefType: BriefType, dryRun: boolean): Promise<B
   const prioritised = prioritiseAll(candidates).map((c) => {
     const newestMs = Math.max(...c.findings.map((f) => f.at.getTime()));
     const oldestMs = Math.min(...c.findings.map((f) => f.at.getTime()));
+    // lastSeen: detectors upsert ongoing conditions in place, so created_at is
+    // when the condition BEGAN — evidence.runAt is when the data last
+    // CONFIRMED it. Both matter: "overdrawn as of this morning, persisting
+    // since 16 Jun" is actionable; conflating them made live conditions look
+    // like stale garbage and stale corpses look live.
+    const lastSeenMs = Math.max(...c.findings.map((f) => {
+      const ev = f.evidenceJson;
+      const runAt = ev && typeof ev === "object" ? (ev as Record<string, unknown>).runAt : null;
+      const t = typeof runAt === "string" ? Date.parse(runAt) : NaN;
+      return Number.isFinite(t) ? t : f.at.getTime();
+    }));
     const ageDays = Math.floor((now.getTime() - newestMs) / 86_400_000);
+    const freshDays = Math.floor((now.getTime() - lastSeenMs) / 86_400_000);
     let priority = c.priority;
     if (ageDays > STALE_NOTE_DAYS) priority = "note" as const;
     else if (ageDays > STALE_DEMOTE_DAYS && priority === "today") priority = "this-week" as const;
-    return { ...c, priority, ageDays, firstRaised: brisbaneDate(new Date(oldestMs)) };
+    return {
+      ...c,
+      priority,
+      ageDays,
+      freshDays,
+      firstRaised: brisbaneDate(new Date(oldestMs)),
+      lastSeen: brisbaneDate(new Date(lastSeenMs)),
+    };
   });
 
   // ── Specialist health → silent agents become their own item. ──
@@ -168,6 +187,8 @@ async function buildBriefInner(briefType: BriefType, dryRun: boolean): Promise<B
       isRestricted: c.isRestricted,
       firstRaised: c.firstRaised,
       ageDays: c.ageDays,
+      lastSeen: c.lastSeen,
+      freshDays: c.freshDays,
       policyTag: c.policyTag ?? null,
     })),
     arPolicy,
@@ -227,8 +248,10 @@ async function buildBriefInner(briefType: BriefType, dryRun: boolean): Promise<B
   // Non-negotiable honesty rules, appended to every brief type.
   const extraInstructions = [
     perTypeInstructions,
-    "Every item carries firstRaised and ageDays.",
+    "Every item carries firstRaised (when the condition began), lastSeen (when the data last confirmed it), ageDays, and freshDays.",
     "Anything with ageDays > 7 is LONG-OUTSTANDING — present it as 'open since <firstRaised>', never as new and never as today's discovery.",
+    "For balance-type items (overdrawn, balance unavailable, low cash) the figure is as at lastSeen: if freshDays <= 1 the figure is CURRENT — say 'as of <lastSeen>, persisting since <firstRaised>'. If freshDays > 2 the condition has stopped being re-confirmed — treat it as unverified and likely resolved; the monitoring gap, not the number, is the issue.",
+    "Where a bank feed is broken (balance-unavailable persisting for weeks), Xero register-derived balances — including 'overdrawn' figures — are unreliable. The action is reconnecting the feed and reconciling; do not treat the register number as a cash emergency.",
     "specialistHealth.lastRunAt is when a detector last ran; it says nothing about how fresh a finding is. Never imply an item is fresh because its agent ran recently, and never invent run times.",
     "If a figure is arithmetically implausible (a ratio above 300%, a credit-card balance described as 'overdrawn', a revenue denominator smaller than one day of payroll), say it looks like a data artifact, name the specific check needed, and do not headline it as an operating result.",
     "If most items are long-outstanding, the headline must say so — do not manufacture urgency from a stale backlog.",
@@ -442,7 +465,9 @@ const AR_CREEP_DAYS = 7;
 
 type PrioritisedCandidate = ReturnType<typeof prioritiseAll>[number] & {
   ageDays: number;
+  freshDays: number;
   firstRaised: string;
+  lastSeen: string;
   policyTag?: "priority-61-90" | "crept-past-90" | "backlog-90-plus";
 };
 
@@ -534,7 +559,9 @@ export function applyReceivablesPolicy(
       findings: [],
       priority: "this-week",
       ageDays: 0,
+      freshDays: 0,
       firstRaised: dataAsOf,
+      lastSeen: dataAsOf,
       policyTag: "backlog-90-plus",
     });
   }
@@ -634,7 +661,9 @@ interface RenderEmailBodyArgs {
     sourceAgents: string[];
     isConflict: boolean;
     ageDays: number;
+    freshDays: number;
     firstRaised: string;
+    lastSeen: string;
     policyTag?: "priority-61-90" | "crept-past-90" | "backlog-90-plus";
   }>;
   staleAgents: Array<{ agent: string; status: string; lastRunAt: string; error: string | null }>;
@@ -670,7 +699,8 @@ function renderEmailBody(a: RenderEmailBodyArgs): string {
       const amt = it.amount != null ? ` — $${Math.round(Math.abs(it.amount)).toLocaleString("en-AU")}` : "";
       const conflict = it.isConflict ? " [CONFLICT]" : "";
       const crept = it.policyTag === "crept-past-90" ? " ⚠ CREPT PAST 90 DAYS" : "";
-      lines.push(`  • [${it.entityCode}] ${it.title}${amt}${conflict}${crept}`);
+      const unconfirmed = it.freshDays > 2 ? ` (last confirmed ${it.lastSeen})` : "";
+      lines.push(`  • [${it.entityCode}] ${it.title}${amt}${conflict}${crept}${unconfirmed}`);
       lines.push(`      from: ${it.sourceAgents.join(", ")}`);
     }
     lines.push("");
@@ -680,7 +710,8 @@ function renderEmailBody(a: RenderEmailBodyArgs): string {
     for (const it of week) {
       const amt = it.amount != null ? ` — $${Math.round(Math.abs(it.amount)).toLocaleString("en-AU")}` : "";
       const aged = it.ageDays > 7 ? ` (open since ${it.firstRaised})` : "";
-      lines.push(`  • [${it.entityCode}] ${it.title}${amt}${aged}`);
+      const unconfirmed = it.freshDays > 2 ? ` (last confirmed ${it.lastSeen})` : "";
+      lines.push(`  • [${it.entityCode}] ${it.title}${amt}${aged}${unconfirmed}`);
     }
     lines.push("");
   }
