@@ -188,6 +188,40 @@ export async function listOpenFindingsForQa(args: {
   }));
 }
 
+/** ALL open findings for specific detectors — no per-agent cap. Used by the
+ *  brief's AR collections policy, which must see every 61-90d / 90+ invoice:
+ *  the stratified fetch orders by severity, so warning-level 60-plus rows
+ *  get starved out by critical 90-plus rows under the cap. */
+export async function listOpenFindingsByDetectors(detectors: string[]): Promise<HermesFinding[]> {
+  if (!hermesConfigured() || detectors.length === 0) return [];
+  const { rows } = await pool().query(
+    `SELECT id, source_agent, run_id, detector, domain, severity, entity_code,
+            is_people_flag, title, detail, amount, ai_explanation, resolved,
+            created_at, evidence
+       FROM findings
+      WHERE resolved = false AND detector = ANY($1)
+      ORDER BY created_at DESC`,
+    [detectors],
+  );
+  return rows.map((r) => ({
+    id: r.id,
+    sourceAgent: r.source_agent,
+    runId: r.run_id,
+    detector: r.detector,
+    domain: r.domain,
+    severity: r.severity,
+    entityCode: r.entity_code,
+    isPeopleFlag: r.is_people_flag,
+    title: r.title,
+    detail: r.detail,
+    amount: r.amount !== null ? Number(r.amount) : null,
+    aiExplanation: r.ai_explanation,
+    resolved: r.resolved,
+    createdAt: r.created_at,
+    evidence: r.evidence ?? null,
+  }));
+}
+
 export interface HermesAgentSummary {
   sourceAgent: string;
   lastRunAt: Date | null;

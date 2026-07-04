@@ -24,7 +24,12 @@ import { detectConflicts } from "./conflict";
 import { captureGoalMetrics, readLatestMetrics, type CapturedMetric } from "./goals";
 import { synthesiseBrief } from "../anthropic";
 import { sendChannelEmail, type Channel, sendHeartbeatFailure } from "../email";
-import { hermesConfigured, listOpenFindingsForQa, type HermesFinding } from "../hermes-findings";
+import {
+  hermesConfigured,
+  listOpenFindingsByDetectors,
+  listOpenFindingsForQa,
+  type HermesFinding,
+} from "../hermes-findings";
 import type { IngestedFinding, SpecialistRunStatus } from "../generated/prisma";
 
 export type BriefType = "daily" | "recon-ar" | "restricted" | "weekly" | "monthly";
@@ -95,10 +100,16 @@ async function buildBriefInner(briefType: BriefType): Promise<BriefResult> {
       error: s.lastError ?? null,
     }));
 
+  // AR collections policy (Tony, 2026-07-04): 61-90d invoices are the working
+  // bucket — always top priority, they only get paid if we chase. An invoice
+  // NEWLY crossing 90 is a process failure (creep). The standing 90+ backlog
+  // is a cleanup list — one aggregate line, not daily itemisation.
+  const { candidates: policyApplied, arPolicy } = applyReceivablesPolicy(prioritised, dataAsOf);
+
   // Channel-determined filter: restricted brief sees ONLY restricted items;
   // every other brief EXCLUDES restricted items entirely.
   const isRestricted = briefType === "restricted";
-  const items = prioritised
+  const items = policyApplied
     .filter((c) => (isRestricted ? c.isRestricted : !c.isRestricted))
     .filter((c) => {
       // Audience split: Nicole owns reconciliation + receivables detail via
@@ -152,7 +163,9 @@ async function buildBriefInner(briefType: BriefType): Promise<BriefResult> {
       isRestricted: c.isRestricted,
       firstRaised: c.firstRaised,
       ageDays: c.ageDays,
+      policyTag: c.policyTag ?? null,
     })),
+    arPolicy,
     restrictedItemSummary: isRestricted
       ? null
       : restrictedTotal > 0
@@ -167,7 +180,7 @@ async function buildBriefInner(briefType: BriefType): Promise<BriefResult> {
         "This is the DAILY brief. Recipient: Tony.",
         "Lead with the single most important thing.",
         "Then: cash position both entities, then today's items (correlated, prioritised), then anything for this week.",
-        "Receivables detail goes to Nicole's separate recon & receivables brief — cover AR in at most one line of headline totals (from goal metrics); do not itemise individual overdue invoices.",
+        "Receivables detail goes to Nicole's separate recon & receivables brief — cover AR in ONE line using arPolicy: the 61-90d pipeline ($ and count), how many invoices crept past 90 in the last 7 days (target is zero — a non-zero creep count is a process failure worth naming), and the 90+ backlog total. Do not itemise individual overdue invoices.",
         "Always include a section titled 'Controls & Audit (Xero ↔ Compliance)'.",
         "In that section, list every itemsForAction whose sourceAgents includes 'controls-audit' — one line each with title, entityCode, and short detail.",
         "If none have 'controls-audit' in sourceAgents, write exactly this single line under the section: 'No findings today — all Xero bills reconciled against compliance tickets, supplier compliance current, vendor master-data and bank-detail changes clean.'",
@@ -179,7 +192,7 @@ async function buildBriefInner(briefType: BriefType): Promise<BriefResult> {
       return [
         "This is the RECONCILIATION & RECEIVABLES brief. Recipient: Nicole, who owns bank reconciliation and aged-care receivables.",
         "Section 1 — Reconciliation: genuinely overdrawn bank accounts, feed gaps / unavailable balances, unposted and late journals, intercompany issues. Credit-card liability balances are NOT overdrawn accounts.",
-        "Section 2 — Receivables: AR aging totals, invoices 90+ days overdue, write-off candidates, debtor exposure breaches. Group by debtor where possible and give one concrete next action per group.",
+        "Section 2 — Receivables, in this exact priority order (see arPolicy): (1) THE 61-90 DAY BUCKET IS ALWAYS THE TOP PRIORITY — these invoices only get paid if we chase them; list every one (policyTag priority-61-90), grouped by debtor, with amounts and a concrete follow-up action each; the goal is this bucket empties and NOTHING crosses 90. (2) Invoices that CREPT past 90 in the last 7 days (policyTag crept-past-90) are process failures — flag each one explicitly. (3) The standing 90+ backlog appears as one aggregate line per entity (policyTag backlog-90-plus) — it needs a working session where every invoice gets a payment plan or a write-off recommendation to Tony; do not itemise it. Then debtor exposure breaches.",
         "Receivables findings do not yet carry a funding-type tag. Where a debtor reference clearly looks NDIS (NDIA or a plan manager), note it as likely NDIS — those are handled separately — rather than assigning Nicole the chase.",
         "Keep it to what Nicole can act on this week. No profit or margin figures.",
       ].join(" ");
@@ -249,6 +262,7 @@ async function buildBriefInner(briefType: BriefType): Promise<BriefResult> {
         sourceExceptionIds: c.sourceExceptionIds,
         firstRaised: c.firstRaised,
         ageDays: c.ageDays,
+        policyTag: c.policyTag ?? null,
       })) as unknown as object,
     },
   });
@@ -386,6 +400,133 @@ function recentCashByEntity(findings: IngestedFinding[]): Record<"SC" | "CQ", Ca
   return out;
 }
 
+// ── AR collections policy ────────────────────────────────────────
+
+const AR_PIPELINE_DETECTOR = "invoice-60-plus";
+const AR_BACKLOG_DETECTORS = new Set(["invoice-90-plus", "writeoff-candidate"]);
+/** An invoice whose 90+ finding is at most this old "crept" past 90 on our watch. */
+const AR_CREEP_DAYS = 7;
+
+type PrioritisedCandidate = ReturnType<typeof prioritiseAll>[number] & {
+  ageDays: number;
+  firstRaised: string;
+  policyTag?: "priority-61-90" | "crept-past-90" | "backlog-90-plus";
+};
+
+export interface ArPolicySummary {
+  policy: string;
+  perEntity: Record<string, { pipeline6190: { count: number; total: number };
+    creptPast90Last7d: { count: number; total: number };
+    backlog90plus: { count: number; total: number } }>;
+}
+
+/** Reshape receivables candidates per the collections policy:
+ *  - 61-90d invoices are ALWAYS "today" (exempt from stale demotion) — they
+ *    only get paid if chased, and they must not creep past 90.
+ *  - 90+ findings newer than AR_CREEP_DAYS are creep failures — "today".
+ *  - older 90+ / write-off candidates collapse into one aggregate backlog
+ *    item per entity (deduped by invoice — the same invoice often carries
+ *    both a 90+ and a write-off finding). */
+export function applyReceivablesPolicy(
+  prioritised: PrioritisedCandidate[],
+  dataAsOf: string,
+): { candidates: PrioritisedCandidate[]; arPolicy: ArPolicySummary } {
+  const out: PrioritisedCandidate[] = [];
+  const backlog: Record<string, { count: number; total: number }> = {};
+  const pipeline: Record<string, { count: number; total: number }> = {};
+  const creep: Record<string, { count: number; total: number }> = {};
+  const seenBacklogInvoices = new Set<string>();
+
+  const bump = (rec: Record<string, { count: number; total: number }>, ent: string, amount: number | null) => {
+    rec[ent] = rec[ent] ?? { count: 0, total: 0 };
+    rec[ent].count += 1;
+    rec[ent].total += Math.abs(amount ?? 0);
+  };
+  const invoiceKeyOf = (c: PrioritisedCandidate): string => {
+    const ev = c.findings[0]?.evidenceJson;
+    const obj = ev && typeof ev === "object" ? (ev as Record<string, unknown>) : {};
+    return String(obj.xeroInvoiceId ?? obj.invoiceNumber ?? c.key);
+  };
+
+  // Pass 1: invoices with an open 90+ finding. Detectors don't auto-resolve
+  // a 60-plus finding when the invoice crosses 90, so a 60-plus row whose
+  // invoice is in this set is stale — the 90+ finding owns it.
+  const past90Invoices = new Set<string>();
+  for (const c of prioritised) {
+    if (c.findings.some((f) => f.detector === "invoice-90-plus")) {
+      past90Invoices.add(invoiceKeyOf(c));
+    }
+  }
+
+  for (const c of prioritised) {
+    const detectors = new Set(c.findings.map((f) => f.detector));
+    if (detectors.has(AR_PIPELINE_DETECTOR)) {
+      if (past90Invoices.has(invoiceKeyOf(c))) continue; // stale 60-plus — invoice already past 90
+      bump(pipeline, c.entityCode, c.amount);
+      out.push({ ...c, priority: "today", policyTag: "priority-61-90" });
+      continue;
+    }
+    const isBacklog = c.findings.length > 0 && c.findings.every((f) => AR_BACKLOG_DETECTORS.has(f.detector));
+    if (isBacklog) {
+      const invoiceKey = invoiceKeyOf(c);
+      if (seenBacklogInvoices.has(invoiceKey)) continue; // same invoice, second detector
+      seenBacklogInvoices.add(invoiceKey);
+      // Creep = the invoice CROSSED 90 recently (fresh 90-plus finding). A
+      // fresh writeoff-candidate alone means it crossed 120, not 90 — backlog.
+      if (c.ageDays <= AR_CREEP_DAYS && detectors.has("invoice-90-plus")) {
+        bump(creep, c.entityCode, c.amount);
+        out.push({ ...c, priority: "today", policyTag: "crept-past-90" });
+      } else {
+        bump(backlog, c.entityCode, c.amount);
+      }
+      continue;
+    }
+    out.push(c);
+  }
+
+  for (const [ent, b] of Object.entries(backlog)) {
+    out.push({
+      key: `ar-backlog-90plus-${ent}`,
+      title: `${ent}: 90+ day AR backlog — ${b.count} invoice(s), $${Math.round(b.total).toLocaleString("en-AU")} — each needs a chase plan or a write-off recommendation`,
+      detail:
+        `Standing backlog of invoices past 90 days (${ent}). Policy: these do not get itemised daily — ` +
+        `they need a working session where every invoice gets either a payment plan or a write-off recommendation to Tony.`,
+      entityCode: ent,
+      amount: b.total,
+      sourceAgents: ["receivables"],
+      sourceExceptionIds: [],
+      isRestricted: false,
+      isConflict: false,
+      topSeverity: "warning",
+      findings: [],
+      priority: "this-week",
+      ageDays: 0,
+      firstRaised: dataAsOf,
+      policyTag: "backlog-90-plus",
+    });
+  }
+
+  const entities = new Set([...Object.keys(pipeline), ...Object.keys(creep), ...Object.keys(backlog)]);
+  const perEntity: ArPolicySummary["perEntity"] = {};
+  for (const ent of entities) {
+    perEntity[ent] = {
+      pipeline6190: pipeline[ent] ?? { count: 0, total: 0 },
+      creptPast90Last7d: creep[ent] ?? { count: 0, total: 0 },
+      backlog90plus: backlog[ent] ?? { count: 0, total: 0 },
+    };
+  }
+  return {
+    candidates: out,
+    arPolicy: {
+      policy:
+        "61-90 day invoices are the always-top-priority working bucket — they only get paid if we chase. " +
+        "Nothing may creep past 90 days (creep count target: zero). The 90+ backlog gets a chase plan or " +
+        "write-off decision per invoice, worked as a project, not itemised daily.",
+      perEntity,
+    },
+  };
+}
+
 // ── Live findings source ─────────────────────────────────────────
 
 /** Items older than this can't claim "NEEDS YOU TODAY". */
@@ -393,10 +534,23 @@ const STALE_DEMOTE_DAYS = 7;
 /** Items older than this drop to the notes section. */
 const STALE_NOTE_DAYS = 21;
 
-async function fetchOpenFindings(): Promise<IngestedFinding[]> {
+export async function fetchOpenFindings(): Promise<IngestedFinding[]> {
   if (hermesConfigured()) {
-    const rows = await listOpenFindingsForQa({ includePeopleFlag: true, limit: 800, perAgentCap: 120 });
-    return rows.map(hermesToFinding);
+    // The AR policy detectors are fetched in full alongside the stratified
+    // set — the severity-ordered per-agent cap otherwise starves out the
+    // warning-level 61-90d rows, which are the collections priority.
+    const [stratified, arRows] = await Promise.all([
+      listOpenFindingsForQa({ includePeopleFlag: true, limit: 800, perAgentCap: 120 }),
+      listOpenFindingsByDetectors([AR_PIPELINE_DETECTOR, ...AR_BACKLOG_DETECTORS]),
+    ]);
+    const seen = new Set<string>();
+    const merged: HermesFinding[] = [];
+    for (const r of [...stratified, ...arRows]) {
+      if (seen.has(r.id)) continue;
+      seen.add(r.id);
+      merged.push(r);
+    }
+    return merged.map(hermesToFinding);
   }
   return prisma.ingestedFinding.findMany({
     where: { resolved: false },
@@ -448,6 +602,7 @@ interface RenderEmailBodyArgs {
     isConflict: boolean;
     ageDays: number;
     firstRaised: string;
+    policyTag?: "priority-61-90" | "crept-past-90" | "backlog-90-plus";
   }>;
   staleAgents: Array<{ agent: string; status: string; lastRunAt: string; error: string | null }>;
   /** When set, append a one-liner reference (non-restricted briefs only). */
@@ -481,7 +636,8 @@ function renderEmailBody(a: RenderEmailBodyArgs): string {
     for (const it of today) {
       const amt = it.amount != null ? ` — $${Math.round(Math.abs(it.amount)).toLocaleString("en-AU")}` : "";
       const conflict = it.isConflict ? " [CONFLICT]" : "";
-      lines.push(`  • [${it.entityCode}] ${it.title}${amt}${conflict}`);
+      const crept = it.policyTag === "crept-past-90" ? " ⚠ CREPT PAST 90 DAYS" : "";
+      lines.push(`  • [${it.entityCode}] ${it.title}${amt}${conflict}${crept}`);
       lines.push(`      from: ${it.sourceAgents.join(", ")}`);
     }
     lines.push("");
