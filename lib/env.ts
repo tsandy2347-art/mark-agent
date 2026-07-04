@@ -106,8 +106,11 @@ const schema = z.object({
   MARK_SPECIALIST_STALE_HOURS: z.coerce.number().int().default(36),
 
   // ── Report routing — spec section 6 ──────────────────────────────
-  /** Daily finance brief — Tony + Nicole. NEVER receives people / pay data. */
+  /** Daily finance brief — Tony. NEVER receives people / pay data. */
   MARK_DAILY_RECIPIENTS: z.string().default(""),
+  /** Reconciliation + receivables brief — Nicole. Rides the daily cron;
+   *  skipped when this list is empty. NEVER receives people / pay data. */
+  MARK_RECON_AR_RECIPIENTS: z.string().default(""),
   /** Restricted brief — Tony + Lindsay (people) and/or Nicole (pay). Only
    *  fires when there's something restricted. */
   MARK_RESTRICTED_RECIPIENTS: z.string().default(""),

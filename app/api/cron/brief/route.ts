@@ -10,7 +10,7 @@
 // the people-restricted recipient list).
 
 import { NextResponse, type NextRequest } from "next/server";
-import { env } from "@/lib/env";
+import { env, recipients } from "@/lib/env";
 import { buildBrief, type BriefType } from "@/lib/mark/brief";
 
 export const dynamic = "force-dynamic";
@@ -23,7 +23,7 @@ function authorised(req: NextRequest): boolean {
 }
 
 function parseBriefType(s: unknown): BriefType | null {
-  if (s === "daily" || s === "restricted" || s === "weekly" || s === "monthly") return s;
+  if (s === "daily" || s === "recon-ar" || s === "restricted" || s === "weekly" || s === "monthly") return s;
   return null;
 }
 
@@ -38,7 +38,15 @@ export async function POST(req: NextRequest) {
   }
   try {
     const result = await buildBrief(briefType);
-    return NextResponse.json({ ok: true, result });
+    // Nicole's recon & receivables brief rides the daily trigger — one cron
+    // sidecar, two emails. Skipped when no recipients are configured.
+    let reconArResult = null;
+    if (briefType === "daily" && recipients(env.MARK_RECON_AR_RECIPIENTS).length > 0) {
+      reconArResult = await buildBrief("recon-ar").catch((e2) => ({
+        error: e2 instanceof Error ? e2.message : String(e2),
+      }));
+    }
+    return NextResponse.json({ ok: true, result, ...(reconArResult ? { reconAr: reconArResult } : {}) });
   } catch (e) {
     return NextResponse.json(
       { ok: false, error: e instanceof Error ? e.message : String(e) },

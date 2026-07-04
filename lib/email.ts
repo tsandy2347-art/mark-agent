@@ -22,6 +22,7 @@ const ses = new SESv2Client({
 
 export type Channel =
   | "daily-brief"
+  | "recon-ar-brief"
   | "restricted-brief"
   | "weekly-report"
   | "monthly-pack"

@@ -27,7 +27,7 @@ import { sendChannelEmail, type Channel, sendHeartbeatFailure } from "../email";
 import { hermesConfigured, listOpenFindingsForQa, type HermesFinding } from "../hermes-findings";
 import type { IngestedFinding, SpecialistRunStatus } from "../generated/prisma";
 
-export type BriefType = "daily" | "restricted" | "weekly" | "monthly";
+export type BriefType = "daily" | "recon-ar" | "restricted" | "weekly" | "monthly";
 
 export interface BriefResult {
   briefId: string;
@@ -98,7 +98,21 @@ async function buildBriefInner(briefType: BriefType): Promise<BriefResult> {
   // Channel-determined filter: restricted brief sees ONLY restricted items;
   // every other brief EXCLUDES restricted items entirely.
   const isRestricted = briefType === "restricted";
-  const items = prioritised.filter((c) => (isRestricted ? c.isRestricted : !c.isRestricted));
+  const items = prioritised
+    .filter((c) => (isRestricted ? c.isRestricted : !c.isRestricted))
+    .filter((c) => {
+      // Audience split: Nicole owns reconciliation + receivables detail via
+      // the recon-ar brief; Tony's daily drops receivables-only items (recon
+      // stays — overdrawn/feed problems are cash-critical) and keeps AR at
+      // headline-total level via goal metrics.
+      if (briefType === "recon-ar") {
+        return c.sourceAgents.some((a) => a === "reconciliation" || a === "receivables");
+      }
+      if (briefType === "daily") {
+        return !c.sourceAgents.every((a) => a === "receivables");
+      }
+      return true;
+    });
 
   const itemsToday = items.filter((c) => c.priority === "today");
   const itemsThisWeek = items.filter((c) => c.priority === "this-week");
@@ -108,12 +122,18 @@ async function buildBriefInner(briefType: BriefType): Promise<BriefResult> {
   // Cash position both entities — pull most recent recon "cash-position" row.
   const cashByEntity = recentCashByEntity(openFindings);
 
+  // Nicole's brief carries no profit/margin content — only cash/AR metrics.
+  const scopedMetrics =
+    briefType === "recon-ar"
+      ? latestMetrics.filter((m) => /dso|cash|receivab|ar\b/i.test(m.metric))
+      : latestMetrics;
+
   // ── Structured payload Anthropic synthesises into prose. ──
   const synthesisPayload = {
     briefType,
     dataAsOf,
     cashByEntity,
-    goalMetrics: latestMetrics,
+    goalMetrics: scopedMetrics,
     specialistHealth: statuses.map((s) => ({
       agent: s.agent,
       status: isStale(s.lastRunAt) ? "stale" : s.lastRunStatus,
@@ -138,20 +158,30 @@ async function buildBriefInner(briefType: BriefType): Promise<BriefResult> {
       : restrictedTotal > 0
         ? `${restrictedTotal} restricted item(s) — see separate brief`
         : null,
-    profitTarget: env.GOAL_PROFIT_TARGET_AUD,
+    profitTarget: briefType === "recon-ar" ? null : env.GOAL_PROFIT_TARGET_AUD,
   };
 
   const perTypeInstructions = (() => {
     if (briefType === "daily") {
       return [
-        "This is the DAILY brief. Recipients: Tony and Nicole.",
+        "This is the DAILY brief. Recipient: Tony.",
         "Lead with the single most important thing.",
         "Then: cash position both entities, then today's items (correlated, prioritised), then anything for this week.",
+        "Receivables detail goes to Nicole's separate recon & receivables brief — cover AR in at most one line of headline totals (from goal metrics); do not itemise individual overdue invoices.",
         "Always include a section titled 'Controls & Audit (Xero ↔ Compliance)'.",
         "In that section, list every itemsForAction whose sourceAgents includes 'controls-audit' — one line each with title, entityCode, and short detail.",
         "If none have 'controls-audit' in sourceAgents, write exactly this single line under the section: 'No findings today — all Xero bills reconciled against compliance tickets, supplier compliance current, vendor master-data and bank-detail changes clean.'",
         "End with one line per silent specialist if any.",
         "Restricted items are referenced only as a count — never name people or quote individual pay.",
+      ].join(" ");
+    }
+    if (briefType === "recon-ar") {
+      return [
+        "This is the RECONCILIATION & RECEIVABLES brief. Recipient: Nicole, who owns bank reconciliation and aged-care receivables.",
+        "Section 1 — Reconciliation: genuinely overdrawn bank accounts, feed gaps / unavailable balances, unposted and late journals, intercompany issues. Credit-card liability balances are NOT overdrawn accounts.",
+        "Section 2 — Receivables: AR aging totals, invoices 90+ days overdue, write-off candidates, debtor exposure breaches. Group by debtor where possible and give one concrete next action per group.",
+        "Receivables findings do not yet carry a funding-type tag. Where a debtor reference clearly looks NDIS (NDIA or a plan manager), note it as likely NDIS — those are handled separately — rather than assigning Nicole the chase.",
+        "Keep it to what Nicole can act on this week. No profit or margin figures.",
       ].join(" ");
     }
     if (briefType === "restricted") {
@@ -247,7 +277,7 @@ async function buildBriefInner(briefType: BriefType): Promise<BriefResult> {
     narrative: synthesis.narrative,
     dataAsOf,
     cashByEntity,
-    goalMetrics: latestMetrics,
+    goalMetrics: scopedMetrics,
     items,
     staleAgents,
     restrictedTotalSummary: isRestricted ? null : restrictedTotal,
@@ -301,6 +331,12 @@ function routing(briefType: BriefType, headline: string): { channel: Channel; to
         channel: "daily-brief",
         to: recipients(env.MARK_DAILY_RECIPIENTS),
         subject: `Mark — daily brief ${dateLabel} — ${headline}`.slice(0, 250),
+      };
+    case "recon-ar":
+      return {
+        channel: "recon-ar-brief",
+        to: recipients(env.MARK_RECON_AR_RECIPIENTS),
+        subject: `Mark — recon & receivables ${dateLabel} — ${headline}`.slice(0, 250),
       };
     case "restricted":
       return {

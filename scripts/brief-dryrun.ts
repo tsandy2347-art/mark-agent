@@ -52,13 +52,24 @@ async function main() {
   });
 
   const nonRestricted = prioritised.filter((c) => !c.isRestricted);
-  for (const bucket of ["today", "this-week", "note"] as const) {
-    const items = nonRestricted.filter((c) => c.priority === bucket);
-    console.log(`\n=== ${bucket.toUpperCase()} (${items.length}) ===`);
-    for (const it of items.slice(0, 25)) {
-      console.log(`  [${it.entityCode}] ${it.title} — age ${it.ageDays}d (first ${it.firstRaised}) [${it.sourceAgents.join(",")}]`);
+  const views = {
+    "TONY daily (receivables-only items excluded)": nonRestricted.filter(
+      (c) => !c.sourceAgents.every((a) => a === "receivables"),
+    ),
+    "NICOLE recon-ar (reconciliation + receivables only)": nonRestricted.filter(
+      (c) => c.sourceAgents.some((a) => a === "reconciliation" || a === "receivables"),
+    ),
+  };
+  for (const [name, view] of Object.entries(views)) {
+    console.log(`\n########## ${name} ##########`);
+    for (const bucket of ["today", "this-week", "note"] as const) {
+      const items = view.filter((c) => c.priority === bucket);
+      console.log(`=== ${bucket.toUpperCase()} (${items.length}) ===`);
+      for (const it of items.slice(0, 12)) {
+        console.log(`  [${it.entityCode}] ${it.title} — age ${it.ageDays}d [${it.sourceAgents.join(",")}]`);
+      }
+      if (items.length > 12) console.log(`  ... ${items.length - 12} more`);
     }
-    if (items.length > 25) console.log(`  ... ${items.length - 25} more`);
   }
   console.log(`\nrestricted items: ${prioritised.filter((c) => c.isRestricted).length}`);
   process.exit(0);
