@@ -157,9 +157,17 @@ async function buildBriefInner(briefType: BriefType, dryRun: boolean): Promise<B
     briefType === "recon-ar"
       ? items.map((c) => {
           const ev = c.findings[0]?.evidenceJson;
-          const name = ev && typeof ev === "object" ? (ev as Record<string, unknown>).contactName : null;
+          const obj = ev && typeof ev === "object" ? (ev as Record<string, unknown>) : {};
+          const name = obj.contactName;
           if (typeof name !== "string" || !name || name === "(unknown)" || c.title.includes(name)) return c;
-          return { ...c, title: `${c.title} — ${name}`, detail: `${c.detail}\nDebtor: ${name}` };
+          // The invoice number + name identify the item; the masked ref is
+          // internal-only noise in Nicole's brief — swap it out, don't stack.
+          const ref = obj.contactRef;
+          const title =
+            typeof ref === "string" && ref && c.title.includes(ref)
+              ? c.title.replace(ref, name)
+              : `${c.title} — ${name}`;
+          return { ...c, title, detail: `${c.detail}\nDebtor: ${name}` };
         })
       : items;
 
@@ -234,7 +242,7 @@ async function buildBriefInner(briefType: BriefType, dryRun: boolean): Promise<B
         "Section 1 — Reconciliation: genuinely overdrawn bank accounts, feed gaps / unavailable balances, unposted and late journals, intercompany issues. Credit-card liability balances are NOT overdrawn accounts.",
         "Section 2 — Receivables, in this exact priority order (see arPolicy): (1) THE 61-90 DAY BUCKET IS ALWAYS THE TOP PRIORITY — these invoices only get paid if we chase them; list every one (policyTag priority-61-90), grouped by debtor, with amounts and a concrete follow-up action each; the goal is this bucket empties and NOTHING crosses 90. (2) Invoices that CREPT past 90 in the last 7 days (policyTag crept-past-90) are process failures — flag each one explicitly. (3) The standing 90+ backlog appears as one aggregate line per entity (policyTag backlog-90-plus) — it needs a working session where every invoice gets a payment plan or a write-off recommendation to Tony; do not itemise it. Then debtor exposure breaches.",
         "Receivables findings do not yet carry a funding-type tag. Where a debtor reference clearly looks NDIS (NDIA or a plan manager), note it as likely NDIS — those are handled separately — rather than assigning Nicole the chase.",
-        "Item titles include the debtor's real name where known (appended after the masked ref like JB-2c62). Refer to debtors BY NAME — the masked ref is only a cross-reference key. If an item has no name, say so and give the invoice number to look up.",
+        "Item titles identify each invoice by invoice number and the debtor's real name. Refer to debtors BY NAME and quote the invoice number. Never use masked refs (like JB-2c62) in your narrative; if an item has no name, give the invoice number to look up in Xero.",
         "Keep it to what Nicole can act on this week. No profit or margin figures.",
       ].join(" ");
     }
