@@ -547,7 +547,10 @@ export async function synthesiseBrief(input: SynthesiseBriefInput): Promise<Synt
       : env.ANTHROPIC_MODEL;
     const resp = await c.messages.create({
       model: briefModel,
-      max_tokens: 1800,
+      // The brief now opens with a coverage section before any finding, so
+      // 1800 was clipping the narrative mid-sentence — a truncated brief hides
+      // exactly the tail items it was meant to surface.
+      max_tokens: 4000,
       system: MARK_SYSTEM,
       messages: [{ role: "user", content: userMsg }],
     });
@@ -555,11 +558,18 @@ export async function synthesiseBrief(input: SynthesiseBriefInput): Promise<Synt
       .filter((b): b is Anthropic.TextBlock => b.type === "text")
       .map((b) => b.text)
       .join("");
+    // A hit ceiling means the narrative is cut off. Say so in the brief rather
+    // than letting it end mid-word and read as if that was all there was.
+    const truncated = resp.stop_reason === "max_tokens";
     const parsed = parseHeadlineNarrative(text);
     if (!parsed) {
       return fallbackSynthesis(input, "(Anthropic returned unparseable output — deterministic fallback)");
     }
-    return { headline: parsed.headline, narrative: parsed.narrative, fromModel: true };
+    const narrative = truncated
+      ? `${parsed.narrative}\n\n[NARRATIVE TRUNCATED — the write-up hit its length limit and stops mid-item. ` +
+        `The structured lists below this line are complete; treat the prose above as partial.]`
+      : parsed.narrative;
+    return { headline: parsed.headline, narrative, fromModel: true };
   } catch (e) {
     const reason = e instanceof Error ? e.message : String(e);
     return fallbackSynthesis(input, `(Anthropic call failed: ${reason} — deterministic fallback)`);

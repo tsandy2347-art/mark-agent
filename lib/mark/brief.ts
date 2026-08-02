@@ -17,7 +17,7 @@ import { DateTime } from "luxon";
 import { prisma } from "../prisma";
 import { env, recipients } from "../env";
 import { brisbane, brisbaneDate } from "../time";
-import { isStale } from "./poll";
+import { isStale, isBlindSpot } from "./poll";
 import { correlateFindings } from "./correlate";
 import { prioritiseAll, type Priority } from "./prioritise";
 import { detectConflicts } from "./conflict";
@@ -79,7 +79,18 @@ async function buildBriefInner(briefType: BriefType, dryRun: boolean): Promise<B
   if (!dryRun) await captureGoalMetrics(openFindings).catch(() => undefined);
 
   // ── Correlate + prioritise + conflict-detect. ──
-  let candidates = correlateFindings(openFindings);
+  // cash-position findings are DATA for the CASH POSITION panel, not action
+  // items — exclude them from correlate/prioritise so a large cash figure
+  // (abs > $25k trips the "today" threshold) can never headline as an alarm.
+  const actionableFindings = openFindings.filter(
+    (f) =>
+      !(f.specialistAgent === "reconciliation" && /cash-?position/i.test(f.detector)) &&
+      !(f.specialistAgent === "tax-compliance" && /gst-?position/i.test(f.detector)) &&
+      // Detector failures are coverage gaps, not work items — they're reported
+      // once in the COVERAGE section instead of scattered through the list.
+      !isDetectorFailure(f.detector),
+  );
+  let candidates = correlateFindings(actionableFindings);
   const conflictRes = detectConflicts(candidates, openFindings);
   candidates = conflictRes.candidates;
   // Stale-honesty: a finding's own date governs how it is presented. An item
@@ -114,15 +125,32 @@ async function buildBriefInner(briefType: BriefType, dryRun: boolean): Promise<B
     };
   });
 
-  // ── Specialist health → silent agents become their own item. ──
+  // ── Specialist health → a blind spot is a finding. ──
+  // Anything that isn't a completed, still-producing run is a domain Mark
+  // CANNOT vouch for. That includes runs stuck at 'running' and agents whose
+  // runs complete but that have stopped writing findings — both of which used
+  // to render as "no exceptions today ✓", i.e. an all-clear over an unchecked
+  // domain. These lead the brief now.
   const staleAgents = statuses
-    .filter((s) => s.lastRunStatus === "failed" || isStale(s.lastRunAt))
+    .filter((s) => isBlindSpot(s.lastRunStatus) || isStale(s.lastRunAt))
     .map((s) => ({
       agent: s.agent,
       status: s.lastRunStatus,
       lastRunAt: s.lastRunAt ? brisbane(s.lastRunAt) : "(never)",
       error: s.lastError ?? null,
     }));
+
+  // Producers that write into the shared findings DB but aren't one of Mark's
+  // seven (so SpecialistRunStatus never tracks them). Their findings still
+  // reach this brief, so their going quiet has to be visible too — otherwise a
+  // dead pipeline's last output keeps getting re-reported as current.
+  staleAgents.push(...silentUnownedProducers(openFindings, statuses, now));
+
+  // Detector-level blind spots: the `*-detector-failed` / `*-failed` findings
+  // the specialists raise when a sub-detector throws. Same category as a silent
+  // agent — "we didn't check" — so they get lifted out of the item list and
+  // reported alongside agent health instead of buried mid-brief.
+  const detectorBlindSpots = summariseDetectorFailures(openFindings, now);
 
   // AR collections policy (Tony, 2026-07-04): 61-90d invoices are the working
   // bucket — always top priority, they only get paid if we chase. An invoice
@@ -178,6 +206,8 @@ async function buildBriefInner(briefType: BriefType, dryRun: boolean): Promise<B
 
   // Cash position both entities — pull most recent recon "cash-position" row.
   const cashByEntity = recentCashByEntity(openFindings);
+  // GST position both entities — pull most recent tax-compliance "gst-position" row.
+  const gstByEntity = recentGstByEntity(openFindings);
 
   // Nicole's brief carries no profit/margin content — only cash/AR metrics.
   const scopedMetrics =
@@ -190,6 +220,7 @@ async function buildBriefInner(briefType: BriefType, dryRun: boolean): Promise<B
     briefType,
     dataAsOf,
     cashByEntity,
+    gstByEntity: briefType === "recon-ar" ? null : gstByEntity,
     goalMetrics: scopedMetrics,
     specialistHealth: statuses.map((s) => ({
       agent: s.agent,
@@ -197,7 +228,12 @@ async function buildBriefInner(briefType: BriefType, dryRun: boolean): Promise<B
       lastRunAt: s.lastRunAt ? brisbane(s.lastRunAt) : null,
       exceptionsOpen: s.exceptionsOpen,
       error: s.lastError,
+      /** When true this agent cannot vouch for its domain — say so, never
+       *  present its silence or its zero-count as a clean result. */
+      isBlindSpot: isBlindSpot(s.lastRunStatus) || isStale(s.lastRunAt),
     })),
+    /** Sub-detectors that are erroring — checks that did not run. */
+    detectorBlindSpots,
     itemsForAction: displayItems.map((c) => ({
       priority: c.priority,
       title: c.title,
@@ -226,13 +262,16 @@ async function buildBriefInner(briefType: BriefType, dryRun: boolean): Promise<B
     if (briefType === "daily") {
       return [
         "This is the DAILY brief. Recipient: Tony.",
-        "Lead with the single most important thing.",
-        "Then: cash position both entities, then today's items (correlated, prioritised), then anything for this week.",
+        "SECTION ONE IS ALWAYS 'What I could not check'. Before any finding, list every specialistHealth entry with isBlindSpot=true and every detectorBlindSpots entry — one line each, naming the domain that is therefore unverified (e.g. a silent payables agent means NO accounts-payable checking happened, not that AP is clean). If both lists are empty, write exactly: 'Coverage: all seven specialists completed and are producing — nothing unchecked.'",
+        "NEVER describe a specialist with no findings as clean, quiet, or ✓ unless its status is exactly 'ok'. Statuses 'silent', 'incomplete', 'stale', 'failed' and 'never' mean the check did not happen — an absence of findings from those agents is an absence of information, and saying otherwise is the single worst error you can make in this brief.",
+        "Where an agent's status is 'silent', any open items it still carries are unverified carry-over from when it last ran — label them as such and do not present them as today's picture.",
+        "Then lead with the single most important thing that DID get checked.",
+        "Then: cash position both entities, then GST position both entities (if gstByEntity has data — say '(no live data)' rather than guessing if it doesn't), then today's items (correlated, prioritised), then anything for this week.",
         "Receivables detail goes to Nicole's separate recon & receivables brief — cover AR in ONE line using arPolicy: the 61-90d pipeline ($ and count), how many invoices crept past 90 in the last 7 days (target is zero — a non-zero creep count is a process failure worth naming), and the 90+ backlog total. Do not itemise individual overdue invoices.",
         "Always include a section titled 'Controls & Audit (Xero ↔ Compliance)'.",
         "In that section, list every itemsForAction whose sourceAgents includes 'controls-audit' — one line each with title, entityCode, and short detail.",
         "If none have 'controls-audit' in sourceAgents, write exactly this single line under the section: 'No findings today — all Xero bills reconciled against compliance tickets, supplier compliance current, vendor master-data and bank-detail changes clean.'",
-        "End with one line per silent specialist if any.",
+        "Do not repeat the coverage gaps at the end — they were section one.",
         "Restricted items are referenced only as a count — never name people or quote individual pay.",
       ].join(" ");
     }
@@ -276,6 +315,7 @@ async function buildBriefInner(briefType: BriefType, dryRun: boolean): Promise<B
     "For balance-type items (overdrawn, balance unavailable, low cash) the figure is as at lastSeen: if freshDays <= 1 the figure is CURRENT — say 'as of <lastSeen>, persisting since <firstRaised>'. If freshDays > 2 the condition has stopped being re-confirmed — treat it as unverified and likely resolved; the monitoring gap, not the number, is the issue.",
     "Where a bank feed is broken (balance-unavailable persisting for weeks), Xero register-derived balances — including 'overdrawn' figures — are unreliable. The action is reconnecting the feed and reconciling; do not treat the register number as a cash emergency.",
     "specialistHealth.lastRunAt is when a detector last ran; it says nothing about how fresh a finding is. Never imply an item is fresh because its agent ran recently, and never invent run times.",
+    "A specialist reporting zero findings is only good news if its status is 'ok'. Zero findings from a 'silent', 'incomplete', 'stale', 'failed' or 'never' agent means nothing was checked — report it as an unmonitored domain and name what is therefore unknown. Never write a tick, 'no exceptions', 'clean' or 'all good' against such an agent.",
     "If a figure is arithmetically implausible (a ratio above 300%, a credit-card balance described as 'overdrawn', a revenue denominator smaller than one day of payroll), say it looks like a data artifact, name the specific check needed, and do not headline it as an operating result.",
     "If most items are long-outstanding, the headline must say so — do not manufacture urgency from a stale backlog.",
     "Craig has left JBC (May 2026) — never assign an action or escalation to Craig.",
@@ -297,9 +337,11 @@ async function buildBriefInner(briefType: BriefType, dryRun: boolean): Promise<B
       narrative: synthesis.narrative,
       dataAsOf,
       cashByEntity,
+      gstByEntity: briefType === "recon-ar" ? null : gstByEntity,
       goalMetrics: scopedMetrics,
       items: displayItems,
       staleAgents,
+      detectorBlindSpots,
       restrictedTotalSummary: isRestricted ? null : restrictedTotal,
     });
     return {
@@ -370,9 +412,11 @@ async function buildBriefInner(briefType: BriefType, dryRun: boolean): Promise<B
     narrative: synthesis.narrative,
     dataAsOf,
     cashByEntity,
+    gstByEntity: briefType === "recon-ar" ? null : gstByEntity,
     goalMetrics: scopedMetrics,
     items: displayItems,
     staleAgents,
+    detectorBlindSpots,
     restrictedTotalSummary: isRestricted ? null : restrictedTotal,
   });
 
@@ -467,15 +511,172 @@ function recentCashByEntity(findings: IngestedFinding[]): Record<"SC" | "CQ", Ca
   const candidates = findings.filter(
     (f) => f.specialistAgent === "reconciliation" && /cash-?position/i.test(f.detector),
   );
-  const sorted = [...candidates].sort((a, b) => b.at.getTime() - a.at.getTime());
+  // A cash-position finding is upserted in place, so created_at is when the
+  // panel was FIRST populated, not when the figure was last confirmed. Date it
+  // off evidence.runAt (the run that re-confirmed it), same as the item-freshness
+  // logic — otherwise today's cash always reads with a weeks-old "as of".
+  const runAtMs = (f: IngestedFinding): number => {
+    const ev = f.evidenceJson;
+    const ra = ev && typeof ev === "object" ? (ev as Record<string, unknown>).runAt : null;
+    const t = typeof ra === "string" ? Date.parse(ra) : NaN;
+    return Number.isFinite(t) ? t : f.at.getTime();
+  };
+  const sorted = [...candidates].sort((a, b) => runAtMs(b) - runAtMs(a));
   for (const f of sorted) {
+    const asOf = brisbaneDate(new Date(runAtMs(f)));
     if (f.entityCode === "SC" && out.SC.amount == null && f.amount != null) {
-      out.SC = { amount: Number(f.amount), asOf: brisbaneDate(f.at) };
+      out.SC = { amount: Number(f.amount), asOf };
     }
     if (f.entityCode === "CQ" && out.CQ.amount == null && f.amount != null) {
-      out.CQ = { amount: Number(f.amount), asOf: brisbaneDate(f.at) };
+      out.CQ = { amount: Number(f.amount), asOf };
     }
   }
+  return out;
+}
+
+interface GstPoint {
+  /** Net GST owed for the current open BAS period (gst.netGst from the finding). */
+  netGst: number | null;
+  /** Cash set aside in mapped GST clearing accounts, if configured. */
+  cashSetAside: number | null;
+  /** BAS period label, e.g. "2026-Q2". */
+  periodLabel: string | null;
+  asOf: string | null;
+}
+
+/** Mirrors recentCashByEntity — pulls the most recent "gst-position" finding
+ *  per entity (Dot / tax-compliance), dated off evidence.runAt so a stale
+ *  figure can never present as today's. */
+function recentGstByEntity(findings: IngestedFinding[]): Record<"SC" | "CQ", GstPoint> {
+  const out: Record<"SC" | "CQ", GstPoint> = {
+    SC: { netGst: null, cashSetAside: null, periodLabel: null, asOf: null },
+    CQ: { netGst: null, cashSetAside: null, periodLabel: null, asOf: null },
+  };
+  const candidates = findings.filter(
+    (f) => f.specialistAgent === "tax-compliance" && /gst-?position/i.test(f.detector),
+  );
+  const runAtMs = (f: IngestedFinding): number => {
+    const ev = f.evidenceJson;
+    const ra = ev && typeof ev === "object" ? (ev as Record<string, unknown>).runAt : null;
+    const t = typeof ra === "string" ? Date.parse(ra) : NaN;
+    return Number.isFinite(t) ? t : f.at.getTime();
+  };
+  const sorted = [...candidates].sort((a, b) => runAtMs(b) - runAtMs(a));
+  for (const f of sorted) {
+    if (f.entityCode !== "SC" && f.entityCode !== "CQ") continue;
+    if (out[f.entityCode].netGst != null) continue; // already filled from a newer row
+    const ev = f.evidenceJson;
+    const obj = ev && typeof ev === "object" ? (ev as Record<string, unknown>) : {};
+    const period = obj.period && typeof obj.period === "object" ? (obj.period as Record<string, unknown>) : {};
+    const cashSetAside = typeof obj.cashSetAside === "number" ? obj.cashSetAside : null;
+    out[f.entityCode] = {
+      netGst: f.amount != null ? Number(f.amount) : null,
+      cashSetAside,
+      periodLabel: typeof period.label === "string" ? period.label : null,
+      asOf: brisbaneDate(new Date(runAtMs(f))),
+    };
+  }
+  return out;
+}
+
+// ── Coverage gaps ────────────────────────────────────────────────
+
+/** A finding that says "this check did not run", not "here is a problem".
+ *  Specialists raise these as `<label>-detector-failed` / `<label>-failed`
+ *  when a sub-detector throws, plus a few named export-missing cases. */
+export function isDetectorFailure(detector: string): boolean {
+  return /(-detector-failed|-failed|^ingest-failure|export-missing|not-configured)$/i.test(detector)
+    || /^ingest-failure/i.test(detector);
+}
+
+/** Feeds into the shared findings DB from producers Mark doesn't run himself.
+ *  If one stops writing, its leftover open rows keep appearing in the brief
+ *  forever with nothing behind them — so a quiet unowned producer is reported
+ *  in the coverage section exactly like a silent specialist. */
+export function silentUnownedProducers(
+  findings: IngestedFinding[],
+  statuses: SpecialistRunStatus[],
+  now: Date,
+): Array<{ agent: string; status: string; lastRunAt: string; error: string | null }> {
+  const owned = new Set(statuses.map((s) => s.agent));
+  const newestByAgent = new Map<string, number>();
+  for (const f of findings) {
+    if (owned.has(f.specialistAgent)) continue;
+    const t = f.at.getTime();
+    if (t > (newestByAgent.get(f.specialistAgent) ?? 0)) newestByAgent.set(f.specialistAgent, t);
+  }
+  const out: Array<{ agent: string; status: string; lastRunAt: string; error: string | null }> = [];
+  for (const [agent, newest] of newestByAgent) {
+    const ageDays = Math.floor((now.getTime() - newest) / 86_400_000);
+    if (ageDays <= SILENT_PRODUCER_DAYS) continue;
+    out.push({
+      agent,
+      status: "silent",
+      lastRunAt: brisbaneDate(new Date(newest)),
+      error:
+        `not one of the seven specialists and has written nothing in ${ageDays} days — ` +
+        `its open items are unverified carry-over, and nothing in its domain is being checked`,
+    });
+  }
+  return out;
+}
+
+/** An unowned producer quiet for longer than this has stopped feeding Mark. */
+const SILENT_PRODUCER_DAYS = 14;
+
+export interface DetectorBlindSpot {
+  agent: string;
+  detector: string;
+  entities: string[];
+  /** Distinct days this check has been failing — the run count, not row count,
+   *  so the date-stamped-dedupKey duplicates don't inflate it. */
+  daysFailing: number;
+  firstSeen: string;
+  lastSeen: string;
+  /** True when the check has been down long enough that anything it would have
+   *  caught is now an unknown backlog, not a fresh gap. */
+  chronic: boolean;
+  sampleTitle: string;
+}
+
+const CHRONIC_BLIND_SPOT_DAYS = 7;
+
+/** Collapse the `*-failed` finding rows into one line per (agent, detector).
+ *  Today these arrive as one row per run per entity — 68 rows for a single
+ *  broken GST check — which is why they read as noise instead of as the
+ *  coverage gap they are. */
+export function summariseDetectorFailures(
+  findings: IngestedFinding[],
+  now: Date,
+): DetectorBlindSpot[] {
+  const byKey = new Map<string, IngestedFinding[]>();
+  for (const f of findings) {
+    if (!isDetectorFailure(f.detector)) continue;
+    const k = `${f.specialistAgent}::${f.detector}`;
+    const bucket = byKey.get(k) ?? [];
+    bucket.push(f);
+    byKey.set(k, bucket);
+  }
+
+  const out: DetectorBlindSpot[] = [];
+  for (const [, group] of byKey) {
+    const times = group.map((f) => f.at.getTime());
+    const first = Math.min(...times);
+    const last = Math.max(...times);
+    const days = new Set(group.map((f) => brisbaneDate(f.at))).size;
+    out.push({
+      agent: group[0].specialistAgent,
+      detector: group[0].detector,
+      entities: [...new Set(group.map((f) => f.entityCode))].sort(),
+      daysFailing: days,
+      firstSeen: brisbaneDate(new Date(first)),
+      lastSeen: brisbaneDate(new Date(last)),
+      chronic: (now.getTime() - first) / 86_400_000 > CHRONIC_BLIND_SPOT_DAYS,
+      sampleTitle: group[0].title,
+    });
+  }
+  // Longest-running gap first — that's the one with the biggest unknown behind it.
+  out.sort((a, b) => Date.parse(a.firstSeen) - Date.parse(b.firstSeen));
   return out;
 }
 
@@ -674,6 +875,8 @@ interface RenderEmailBodyArgs {
   narrative: string;
   dataAsOf: string;
   cashByEntity: Record<"SC" | "CQ", CashPoint>;
+  /** null for briefs that never carry tax content (e.g. recon-ar). */
+  gstByEntity: Record<"SC" | "CQ", GstPoint> | null;
   goalMetrics: CapturedMetric[];
   items: Array<{
     title: string;
@@ -690,8 +893,28 @@ interface RenderEmailBodyArgs {
     policyTag?: "priority-61-90" | "crept-past-90" | "backlog-90-plus";
   }>;
   staleAgents: Array<{ agent: string; status: string; lastRunAt: string; error: string | null }>;
+  detectorBlindSpots: DetectorBlindSpot[];
   /** When set, append a one-liner reference (non-restricted briefs only). */
   restrictedTotalSummary: number | null;
+}
+
+/** Amounts only earn a slot when they carry information. A finding with a
+ *  null or zero amount (unposted journals all carry 0.00) used to render as
+ *  "— $0", which reads like a real figure of nothing. */
+function amountSuffix(amount: number | null): string {
+  if (amount == null || Math.round(Math.abs(amount)) === 0) return "";
+  return ` — $${Math.round(Math.abs(amount)).toLocaleString("en-AU")}`;
+}
+
+/** Titles carry the whole meaning of a line, so cut them on a word boundary
+ *  and mark the cut, rather than slicing mid-word as the detectors' own
+ *  embedded-description titles do. */
+function tidyTitle(title: string, max = 150): string {
+  const t = title.replace(/\s+/g, " ").trim();
+  if (t.length <= max) return t;
+  const cut = t.slice(0, max);
+  const sp = cut.lastIndexOf(" ");
+  return `${(sp > max * 0.6 ? cut.slice(0, sp) : cut).replace(/[\s\-–—,;:[(]+$/, "")}…`;
 }
 
 function renderEmailBody(a: RenderEmailBodyArgs): string {
@@ -701,6 +924,29 @@ function renderEmailBody(a: RenderEmailBodyArgs): string {
   lines.push(a.narrative);
   lines.push("");
   lines.push("─────────────────────────────────────────────");
+
+  // Coverage first. What Mark could NOT check outranks anything he did.
+  const coverageLines: string[] = [];
+  for (const s of a.staleAgents) {
+    coverageLines.push(
+      `  ✗ ${s.agent}: ${s.status.toUpperCase()} — last run ${s.lastRunAt}${s.error ? ` — ${s.error}` : ""}`,
+    );
+  }
+  for (const d of a.detectorBlindSpots) {
+    const ent = d.entities.length > 0 ? ` [${d.entities.join(", ")}]` : "";
+    coverageLines.push(
+      `  ✗ ${d.agent} / ${d.detector}${ent} — failing ${d.daysFailing} run(s) since ${d.firstSeen}` +
+        `${d.chronic ? " — CHRONIC, assume an unknown backlog behind it" : ""}`,
+    );
+  }
+  if (coverageLines.length > 0) {
+    lines.push(`WHAT I COULD NOT CHECK (${coverageLines.length}) — these domains are UNVERIFIED, not clean:`);
+    lines.push(...coverageLines);
+  } else {
+    lines.push("COVERAGE: all specialists completed and are producing — nothing unchecked.");
+  }
+  lines.push("");
+
   lines.push("CASH POSITION");
   for (const ent of ["SC", "CQ"] as const) {
     const cp = a.cashByEntity[ent];
@@ -712,6 +958,24 @@ function renderEmailBody(a: RenderEmailBodyArgs): string {
   }
   lines.push("");
 
+  if (a.gstByEntity) {
+    lines.push("GST POSITION");
+    for (const ent of ["SC", "CQ"] as const) {
+      const gp = a.gstByEntity[ent];
+      if (gp.netGst == null) {
+        lines.push(`  ${ent}: (no live data)`);
+        continue;
+      }
+      const period = gp.periodLabel ? ` for ${gp.periodLabel}` : "";
+      const cash = gp.cashSetAside != null
+        ? `, $${gp.cashSetAside.toLocaleString("en-AU", { maximumFractionDigits: 0 })} set aside`
+        : "";
+      const asOf = gp.asOf ? ` (as of ${gp.asOf})` : "";
+      lines.push(`  ${ent}: $${gp.netGst.toLocaleString("en-AU", { maximumFractionDigits: 0 })} owed${period}${cash}${asOf}`);
+    }
+    lines.push("");
+  }
+
   const today = a.items.filter((i) => i.priority === "today");
   const week = a.items.filter((i) => i.priority === "this-week");
   const notes = a.items.filter((i) => i.priority === "note");
@@ -719,11 +983,12 @@ function renderEmailBody(a: RenderEmailBodyArgs): string {
   if (today.length > 0) {
     lines.push(`NEEDS YOU TODAY (${today.length}):`);
     for (const it of today) {
-      const amt = it.amount != null ? ` — $${Math.round(Math.abs(it.amount)).toLocaleString("en-AU")}` : "";
       const conflict = it.isConflict ? " [CONFLICT]" : "";
       const crept = it.policyTag === "crept-past-90" ? " ⚠ CREPT PAST 90 DAYS" : "";
       const unconfirmed = it.freshDays > 2 ? ` (last confirmed ${it.lastSeen})` : "";
-      lines.push(`  • [${it.entityCode}] ${it.title}${amt}${conflict}${crept}${unconfirmed}`);
+      lines.push(
+        `  • [${it.entityCode}] ${tidyTitle(it.title)}${amountSuffix(it.amount)}${conflict}${crept}${unconfirmed}`,
+      );
       lines.push(`      from: ${it.sourceAgents.join(", ")}`);
     }
     lines.push("");
@@ -731,10 +996,9 @@ function renderEmailBody(a: RenderEmailBodyArgs): string {
   if (week.length > 0) {
     lines.push(`THIS WEEK (${week.length}):`);
     for (const it of week) {
-      const amt = it.amount != null ? ` — $${Math.round(Math.abs(it.amount)).toLocaleString("en-AU")}` : "";
       const aged = it.ageDays > 7 ? ` (open since ${it.firstRaised})` : "";
       const unconfirmed = it.freshDays > 2 ? ` (last confirmed ${it.lastSeen})` : "";
-      lines.push(`  • [${it.entityCode}] ${it.title}${amt}${aged}${unconfirmed}`);
+      lines.push(`  • [${it.entityCode}] ${tidyTitle(it.title)}${amountSuffix(it.amount)}${aged}${unconfirmed}`);
     }
     lines.push("");
   }
@@ -742,18 +1006,9 @@ function renderEmailBody(a: RenderEmailBodyArgs): string {
     lines.push(`NOTES (${notes.length}):`);
     for (const it of notes.slice(0, 12)) {
       const aged = it.ageDays > 7 ? ` (open since ${it.firstRaised})` : "";
-      lines.push(`  • [${it.entityCode}] ${it.title}${aged}`);
+      lines.push(`  • [${it.entityCode}] ${tidyTitle(it.title)}${aged}`);
     }
     if (notes.length > 12) lines.push(`  ... ${notes.length - 12} more`);
-    lines.push("");
-  }
-
-  if (a.staleAgents.length > 0) {
-    lines.push("SPECIALIST HEALTH (silent / failed):");
-    for (const s of a.staleAgents) {
-      lines.push(`  • ${s.agent}: ${s.status} — last run ${s.lastRunAt}${s.error ? ` (${s.error})` : ""}`);
-    }
-    lines.push("  (A silent specialist is its own finding — Mark cannot vouch for what they didn't check.)");
     lines.push("");
   }
 

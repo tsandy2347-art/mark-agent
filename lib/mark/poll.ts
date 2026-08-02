@@ -16,11 +16,52 @@ import { env, type SpecialistAgent, specialists } from "../env";
 import { summariseByAgent } from "../hermes-findings";
 import { mockFindingsFor } from "./mock/fixtures";
 
+/** Every state a specialist can be in.
+ *
+ *  The three blind-spot states are the ones that matter, because each one used
+ *  to collapse into "ok":
+ *    incomplete — the run row never left 'running'. The process started and
+ *                 died. Zero findings from a dead process is not a clean bill.
+ *    silent     — runs complete, but the agent has never written a finding, or
+ *                 hasn't written/refreshed one in SILENT_FINDING_DAYS. It is
+ *                 going through the motions and producing nothing.
+ *    never      — no run row at all.
+ *
+ *  `ok` now has to be EARNED: a completed recent run from an agent that is
+ *  demonstrably still producing output. Silence is never evidence of health. */
+export type SpecialistStatus =
+  | "ok"
+  | "exceptions"
+  | "failed"
+  | "stale"
+  | "never"
+  | "incomplete"
+  | "silent";
+
+/** A specialist in one of these states cannot vouch for its domain — Mark must
+ *  say so out loud rather than implying the domain is clean. */
+export const BLIND_SPOT_STATUSES: ReadonlySet<SpecialistStatus> = new Set<SpecialistStatus>([
+  "failed",
+  "stale",
+  "never",
+  "incomplete",
+  "silent",
+]);
+
+export function isBlindSpot(status: string): boolean {
+  return BLIND_SPOT_STATUSES.has(status as SpecialistStatus);
+}
+
+/** An agent whose runs complete but which hasn't written or refreshed a single
+ *  finding in this many days has gone quiet — treat as a blind spot, not "no
+ *  news is good news". */
+export const SILENT_FINDING_DAYS = 14;
+
 export interface PollResult {
   agent: SpecialistAgent;
   ok: boolean;
   count: number;
-  status: "ok" | "exceptions" | "failed" | "stale" | "never";
+  status: SpecialistStatus;
   error?: string;
 }
 
@@ -93,39 +134,75 @@ export async function pollAll(): Promise<PollResult[]> {
     if (!row || !row.lastRunAt) {
       // Detector has never written to audit_runs. Treat as "never" so the
       // briefs flag it as a blind spot.
-      await persistStatus(agent, { lastRunStatus: "never", lastError: null, exceptionsOpen: 0 });
+      await persistStatus(agent, {
+        lastRunStatus: "never",
+        lastError: "no run has ever been recorded — this domain has never been checked",
+        exceptionsOpen: 0,
+      });
       out.push({ agent, ok: false, count: 0, status: "never" });
       continue;
     }
 
     const stale = isStale(row.lastRunAt);
+    const findingAgeDays =
+      row.lastFindingAt == null
+        ? null
+        : Math.floor((Date.now() - row.lastFindingAt.getTime()) / 86_400_000);
+    // Runs complete but nothing comes out the other end.
+    const goneQuiet =
+      row.everWroteFindings === 0 || (findingAgeDays != null && findingAgeDays > SILENT_FINDING_DAYS);
+
     // Translate the brain's run.status into Mark's vocabulary.
-    let status: PollResult["status"];
+    //
+    // Order matters: every way of NOT knowing is checked before any way of
+    // being fine. The old mapping fell through to `ok` whenever openCount was
+    // 0, which is how a payables detector that has never in its life completed
+    // a run or written a finding got reported as "no exceptions today ✓".
+    let status: SpecialistStatus;
+    let blindSpotNote: string | null = null;
+
     if (stale) {
       status = "stale";
-    } else if (row.lastStatus === "ok") {
-      status = "ok";
-    } else if (row.lastStatus === "exceptions") {
-      status = "exceptions";
+      blindSpotNote = `no run in ${env.MARK_SPECIALIST_STALE_HOURS}h — this domain is unchecked`;
     } else if (row.lastStatus === "failed") {
       status = "failed";
+      blindSpotNote = "last run reported failure — this domain is unchecked";
+    } else if (row.lastStatus !== "ok" && row.lastStatus !== "exceptions") {
+      // 'running', 'partial', NULL, anything unrecognised. The run started and
+      // never reached a terminal state, so it produced no trustworthy result.
+      status = "incomplete";
+      blindSpotNote =
+        `last run never completed (status "${row.lastStatus ?? "unknown"}")` +
+        (row.lastCompletedRunAt
+          ? ` — last completed run ${row.lastCompletedRunAt.toISOString().slice(0, 10)}`
+          : " — this detector has never completed a run") +
+        ". No result means unchecked, not clean.";
+    } else if (goneQuiet) {
+      // Terminal status, but the agent isn't producing. Distinguish "never has"
+      // from "used to and stopped" — they need different fixes.
+      status = "silent";
+      blindSpotNote =
+        row.everWroteFindings === 0
+          ? "runs complete but this detector has never written a single finding — it is not actually checking anything"
+          : `runs complete but no finding written or refreshed in ${findingAgeDays} days — its ${row.openCount} open item(s) are unverified carry-over, not today's picture`;
+    } else if (row.openCount > 0) {
+      status = "exceptions";
     } else {
-      // Anything else (running, partial, NULL) — treat as exceptions so it
-      // still shows in the dashboard with the real open-count.
-      status = row.openCount > 0 ? "exceptions" : "ok";
+      status = "ok";
     }
 
     await persistStatus(agent, {
       lastRunAt: row.lastRunAt,
       lastRunStatus: status,
-      lastError: null,
+      lastError: blindSpotNote,
       exceptionsOpen: row.openCount,
     });
     out.push({
       agent,
-      ok: status !== "failed",
+      ok: !isBlindSpot(status),
       count: row.openCount,
       status,
+      ...(blindSpotNote ? { error: blindSpotNote } : {}),
     });
   }
   return out;
@@ -135,7 +212,7 @@ async function persistStatus(
   agent: SpecialistAgent,
   patch: {
     lastRunAt?: Date;
-    lastRunStatus?: "ok" | "exceptions" | "failed" | "stale" | "never";
+    lastRunStatus?: SpecialistStatus;
     lastError?: string | null;
     exceptionsOpen?: number;
   },

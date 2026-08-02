@@ -229,6 +229,16 @@ export interface HermesAgentSummary {
   openCount: number;
   openCritical: number;
   totalRuns: number;
+  /** Most recent run that actually reached a terminal state. A run row left at
+   *  'running' means the process died mid-flight — it started but never
+   *  finished, and MUST NOT be read as a clean result. */
+  lastCompletedRunAt: Date | null;
+  /** When this agent last wrote (or refreshed) any finding. An agent whose runs
+   *  complete but which hasn't written a finding in weeks is not "clean" —
+   *  it has gone quiet, and that is itself a finding. */
+  lastFindingAt: Date | null;
+  /** Findings this agent has ever written. 0 = it has never produced output. */
+  everWroteFindings: number;
 }
 
 export interface HermesDetectorRollup {
@@ -323,9 +333,27 @@ export async function summariseByAgent(): Promise<HermesAgentSummary[]> {
          FROM audit_runs
          ORDER BY source_agent, run_at DESC
      ),
+     last_completed AS (
+       -- A run still marked 'running' never reached a terminal state; the
+       -- process died mid-flight. Only terminal statuses count as "this
+       -- agent actually finished a pass".
+       SELECT source_agent, MAX(run_at) AS last_completed_run_at
+         FROM audit_runs
+        WHERE status IN ('ok', 'exceptions', 'failed', 'partial')
+        GROUP BY source_agent
+     ),
      run_totals AS (
        SELECT source_agent, COUNT(*)::int AS total_runs
          FROM audit_runs
+         GROUP BY source_agent
+     ),
+     finding_activity AS (
+       -- Across ALL findings, resolved or not: when did this agent last
+       -- actually produce output, and has it ever?
+       SELECT source_agent,
+              MAX(created_at) AS last_finding_at,
+              COUNT(*)::int   AS ever_wrote
+         FROM findings
          GROUP BY source_agent
      ),
      open_totals AS (
@@ -336,15 +364,20 @@ export async function summariseByAgent(): Promise<HermesAgentSummary[]> {
          WHERE resolved = false
          GROUP BY source_agent
      )
-     SELECT COALESCE(lr.source_agent, ot.source_agent, rt.source_agent) AS source_agent,
+     SELECT COALESCE(lr.source_agent, ot.source_agent, rt.source_agent, fa.source_agent) AS source_agent,
             lr.last_run_at,
             lr.last_status,
+            lc.last_completed_run_at,
+            fa.last_finding_at,
+            COALESCE(fa.ever_wrote, 0) AS ever_wrote,
             COALESCE(ot.open_count, 0) AS open_count,
             COALESCE(ot.open_critical, 0) AS open_critical,
             COALESCE(rt.total_runs, 0) AS total_runs
        FROM last_run lr
-       FULL OUTER JOIN open_totals ot ON ot.source_agent = lr.source_agent
-       FULL OUTER JOIN run_totals  rt ON rt.source_agent = lr.source_agent
+       FULL OUTER JOIN open_totals     ot ON ot.source_agent = lr.source_agent
+       FULL OUTER JOIN run_totals      rt ON rt.source_agent = lr.source_agent
+       FULL OUTER JOIN finding_activity fa ON fa.source_agent = lr.source_agent
+        LEFT JOIN last_completed       lc ON lc.source_agent = COALESCE(lr.source_agent, ot.source_agent, rt.source_agent, fa.source_agent)
       ORDER BY 1`,
   );
   return rows.map((r) => ({
@@ -354,5 +387,8 @@ export async function summariseByAgent(): Promise<HermesAgentSummary[]> {
     openCount: r.open_count ?? 0,
     openCritical: r.open_critical ?? 0,
     totalRuns: r.total_runs ?? 0,
+    lastCompletedRunAt: r.last_completed_run_at ?? null,
+    lastFindingAt: r.last_finding_at ?? null,
+    everWroteFindings: r.ever_wrote ?? 0,
   }));
 }
