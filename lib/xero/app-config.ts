@@ -35,6 +35,17 @@ const FLEET_SCOPES = [
   // journals live under accounting.manualjournals).
   "accounting.banktransactions.read",      // Rex — bank movements / unreconciled
   "accounting.manualjournals.read",        // Rex (manual journals), Flora (audit)
+  // NOTE (2026-07-28): Dot's GST detector 401s on every /Journals call because
+  // that endpoint needs "accounting.journals.read", which does NOT belong in
+  // this list — Xero gates that scope behind the Advanced pricing tier + a
+  // manual security-approval process (confirmed: adding it here made Xero's
+  // /authorize reject the WHOLE consent request with invalid_scope, blocking
+  // reauth entirely). Do not re-add it without Tony/Xero sorting the Advanced
+  // tier + approval first. Real fix: switch gst.py off list_journals_since
+  // and onto the BAS/Activity Statement report (getActivityStatementReport,
+  // already covered by accounting.reports.taxreports.read below) or the
+  // GST control account balance via TrialBalance (already used for
+  // cash-set-aside) — both need zero new scope.
   "accounting.contacts.read",              // every specialist (customer/supplier master)
   "accounting.settings.read",              // chart of accounts, tax rates, branding
   "accounting.invoices.read",              // Monty, Vera, Archie
