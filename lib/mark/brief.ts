@@ -234,6 +234,11 @@ async function buildBriefInner(briefType: BriefType, dryRun: boolean): Promise<B
     })),
     /** Sub-detectors that are erroring — checks that did not run. */
     detectorBlindSpots,
+    /** The authoritative blind-spot list the email renders. Includes producers
+     *  outside the seven specialists (they still feed findings into this
+     *  brief, so their going quiet is a gap too) — without this the narrative
+     *  only saw specialistHealth and quietly dropped them. */
+    blindSpotAgents: staleAgents,
     itemsForAction: displayItems.map((c) => ({
       priority: c.priority,
       title: c.title,
@@ -262,7 +267,8 @@ async function buildBriefInner(briefType: BriefType, dryRun: boolean): Promise<B
     if (briefType === "daily") {
       return [
         "This is the DAILY brief. Recipient: Tony.",
-        "SECTION ONE IS ALWAYS 'What I could not check'. Before any finding, list every specialistHealth entry with isBlindSpot=true and every detectorBlindSpots entry — one line each, naming the domain that is therefore unverified (e.g. a silent payables agent means NO accounts-payable checking happened, not that AP is clean). If both lists are empty, write exactly: 'Coverage: all seven specialists completed and are producing — nothing unchecked.'",
+        "SECTION ONE IS ALWAYS 'What I could not check'. Before any finding, list EVERY entry in blindSpotAgents and EVERY entry in detectorBlindSpots — one line each, naming the domain that is therefore unverified (e.g. a silent payables agent means NO accounts-payable checking happened, not that AP is clean). blindSpotAgents includes producers that are not one of the seven specialists; they still feed findings into this brief, so never omit one on the grounds that it isn't a specialist. The count you report must equal blindSpotAgents.length + detectorBlindSpots.length. If both are empty, write exactly: 'Coverage: every producer completed and is reporting — nothing unchecked.'",
+        "Do not describe a gap as current unless it is in one of those two lists. A failure that stopped recurring has been fixed; listing it anyway is as damaging as hiding a real one.",
         "NEVER describe a specialist with no findings as clean, quiet, or ✓ unless its status is exactly 'ok'. Statuses 'silent', 'incomplete', 'stale', 'failed' and 'never' mean the check did not happen — an absence of findings from those agents is an absence of information, and saying otherwise is the single worst error you can make in this brief.",
         "Where an agent's status is 'silent', any open items it still carries are unverified carry-over from when it last ran — label them as such and do not present them as today's picture.",
         "Then lead with the single most important thing that DID get checked.",
