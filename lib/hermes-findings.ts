@@ -348,11 +348,23 @@ export async function summariseByAgent(): Promise<HermesAgentSummary[]> {
          GROUP BY source_agent
      ),
      finding_activity AS (
-       -- Across ALL findings, resolved or not: when did this agent last
-       -- actually produce output, and has it ever?
+       -- When did this agent last actually produce output, and has it ever?
+       --
+       -- created_at is NOT the answer. Detectors upsert: a condition that is
+       -- still true every day keeps its original created_at forever while the
+       -- row is rewritten each run. Judging liveness on created_at therefore
+       -- marks a perfectly healthy detector as dead — payroll-labour re-emits
+       -- 3,900 findings daily and looked "silent for 36 days" on that measure.
+       -- evidence.runAt is stamped fresh on every write, so the real signal is
+       -- the later of the two.
        SELECT source_agent,
-              MAX(created_at) AS last_finding_at,
-              COUNT(*)::int   AS ever_wrote
+              MAX(GREATEST(
+                created_at,
+                CASE WHEN evidence->>'runAt' ~ '^\\d{4}-\\d{2}-\\d{2}T'
+                     THEN (evidence->>'runAt')::timestamptz
+                     ELSE created_at END
+              )) AS last_finding_at,
+              COUNT(*)::int AS ever_wrote
          FROM findings
          GROUP BY source_agent
      ),
