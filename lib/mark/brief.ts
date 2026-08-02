@@ -641,17 +641,39 @@ export interface DetectorBlindSpot {
 
 const CHRONIC_BLIND_SPOT_DAYS = 7;
 
-/** Collapse the `*-failed` finding rows into one line per (agent, detector).
- *  Today these arrive as one row per run per entity — 68 rows for a single
- *  broken GST check — which is why they read as noise instead of as the
- *  coverage gap they are. */
+/** A failure finding only proves a CURRENT gap if the most recent run
+ *  re-raised it. Detectors run daily, so anything not re-confirmed inside this
+ *  window describes a check that has since recovered. */
+const BLIND_SPOT_CONFIRM_HOURS = 36;
+
+/** When a finding's evidence was last written. Detectors upsert in place, so
+ *  created_at is when the condition began; evidence.runAt is when it was last
+ *  re-confirmed. For a coverage gap only the latter means anything. */
+function lastConfirmedMs(f: IngestedFinding): number {
+  const ev = f.evidenceJson;
+  const runAt = ev && typeof ev === "object" ? (ev as Record<string, unknown>).runAt : null;
+  const t = typeof runAt === "string" ? Date.parse(runAt) : NaN;
+  return Number.isFinite(t) ? t : f.at.getTime();
+}
+
+/** Collapse the `*-failed` finding rows into one line per (agent, detector),
+ *  and — critically — only for checks that are STILL failing.
+ *
+ *  Reporting every open failure row as a live gap was its own false alarm: on
+ *  2 Aug the brief listed nine "chronic" blind spots including four
+ *  tax-compliance detectors that had in fact run clean that morning. Their
+ *  findings were just June corpses nothing had ever closed. Telling someone a
+ *  domain is unmonitored when it isn't is the same class of error as telling
+ *  them it's clean when it isn't — both destroy trust in the section. */
 export function summariseDetectorFailures(
   findings: IngestedFinding[],
   now: Date,
 ): DetectorBlindSpot[] {
+  const cutoff = now.getTime() - BLIND_SPOT_CONFIRM_HOURS * 3_600_000;
   const byKey = new Map<string, IngestedFinding[]>();
   for (const f of findings) {
     if (!isDetectorFailure(f.detector)) continue;
+    if (lastConfirmedMs(f) < cutoff) continue; // recovered — not a current gap
     const k = `${f.specialistAgent}::${f.detector}`;
     const bucket = byKey.get(k) ?? [];
     bucket.push(f);
@@ -660,10 +682,12 @@ export function summariseDetectorFailures(
 
   const out: DetectorBlindSpot[] = [];
   for (const [, group] of byKey) {
-    const times = group.map((f) => f.at.getTime());
-    const first = Math.min(...times);
-    const last = Math.max(...times);
-    const days = new Set(group.map((f) => brisbaneDate(f.at))).size;
+    const first = Math.min(...group.map((f) => f.at.getTime()));
+    const last = Math.max(...group.map(lastConfirmedMs));
+    // Elapsed days the condition has persisted — NOT a row count. Counting
+    // rows reported "failing 34 runs" when 34 was simply how many duplicate
+    // rows the old date-stamped dedupKeys had accumulated.
+    const days = Math.max(1, Math.round((last - first) / 86_400_000));
     out.push({
       agent: group[0].specialistAgent,
       detector: group[0].detector,
