@@ -233,6 +233,9 @@ async function buildBriefInner(briefType: BriefType, dryRun: boolean): Promise<B
   const synthesisPayload = {
     briefType,
     dataAsOf,
+    /** Authoritative answer to "did the agents run this morning?" — from the
+     *  agents' own run log. Outranks specialistHealth. */
+    systemCheck,
     cashByEntity,
     gstByEntity: briefType === "recon-ar" ? null : gstByEntity,
     goalMetrics: scopedMetrics,
@@ -329,6 +332,11 @@ async function buildBriefInner(briefType: BriefType, dryRun: boolean): Promise<B
 
   // Non-negotiable honesty rules, appended to every brief type.
   const extraInstructions = [
+    ...(systemCheck && !systemCheck.ok
+      ? [
+          "data.systemCheck.ok is FALSE. Open the narrative by saying the system check failed and listing data.systemCheck.problems in plain words. Never say coverage is complete or that every agent ran cleanly.",
+        ]
+      : []),
     perTypeInstructions,
     "Every item carries firstRaised (when the condition began), lastSeen (when the data last confirmed it), ageDays, and freshDays.",
     "Anything with ageDays > 7 is LONG-OUTSTANDING — present it as 'open since <firstRaised>', never as new and never as today's discovery.",
@@ -351,7 +359,11 @@ async function buildBriefInner(briefType: BriefType, dryRun: boolean): Promise<B
 
   // ── Dry-run: render the email and stop — no persistence, no send. ──
   if (dryRun) {
-    const { to: dryTo, subject: drySubject } = routing(briefType, synthesis.headline);
+    const dryRouted = routing(briefType, synthesis.headline);
+    const dryTo = dryRouted.to;
+    const drySubject = systemCheck && !systemCheck.ok
+      ? `⚠ SYSTEM CHECK FAILED — ${dryRouted.subject}`.slice(0, 250)
+      : dryRouted.subject;
     const dryBody = renderEmailBody({
       headline: synthesis.headline,
       narrative: synthesis.narrative,
@@ -989,14 +1001,14 @@ function renderEmailBody(a: RenderEmailBodyArgs): string {
   const lines: string[] = [];
   lines.push(`HEADLINE: ${a.headline}`);
   lines.push("");
-  lines.push(a.narrative);
-  lines.push("");
-  lines.push("─────────────────────────────────────────────");
-
+  // Before the narrative: whether to trust anything below comes first.
   if (a.systemCheck) {
     lines.push(...renderSystemCheck(a.systemCheck));
     lines.push("");
   }
+  lines.push(a.narrative);
+  lines.push("");
+  lines.push("─────────────────────────────────────────────");
 
   // Coverage first. What Mark could NOT check outranks anything he did.
   const coverageLines: string[] = [];
