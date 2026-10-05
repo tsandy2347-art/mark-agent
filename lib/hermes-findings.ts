@@ -469,3 +469,60 @@ export async function reopenFindingsClosedByBrief(ids: string[]): Promise<number
   );
   return rowCount ?? 0;
 }
+
+/** Latest audit_runs row per source_agent since `since` (null = no run). */
+export async function latestRunsSince(since: Date): Promise<Map<string, HermesAuditRun>> {
+  const out = new Map<string, HermesAuditRun>();
+  if (!hermesConfigured()) return out;
+  const { rows } = await pool().query(
+    `SELECT DISTINCT ON (source_agent)
+            id, source_agent, run_at, status, exceptions_count, critical_count,
+            people_flags_count, duration_ms, failure_note
+       FROM audit_runs
+      WHERE run_at >= $1
+      ORDER BY source_agent, run_at DESC`,
+    [since],
+  );
+  for (const r of rows) {
+    out.set(r.source_agent, {
+      id: r.id,
+      sourceAgent: r.source_agent,
+      runAt: r.run_at,
+      status: r.status,
+      exceptionsCount: r.exceptions_count ?? 0,
+      criticalCount: r.critical_count ?? 0,
+      peopleFlagsCount: r.people_flags_count ?? 0,
+      durationMs: r.duration_ms,
+      failureNote: r.failure_note,
+    });
+  }
+  return out;
+}
+
+/** Open findings per (agent, detector), plus how many were raised/refreshed
+ *  since `since` — the system check uses these to spot floods and checks
+ *  that could not run this morning. */
+export async function openFindingCounts(since: Date): Promise<
+  Array<{ sourceAgent: string; detector: string; open: number; touchedSince: number; sampleTitle: string }>
+> {
+  if (!hermesConfigured()) return [];
+  const { rows } = await pool().query(
+    `SELECT source_agent, detector, count(*)::int AS open,
+            count(*) FILTER (
+              WHERE created_at >= $1
+                 OR (evidence->>'runAt') >= $2
+            )::int AS touched,
+            min(title) AS sample
+       FROM findings
+      WHERE resolved = false
+      GROUP BY 1, 2`,
+    [since, since.toISOString()],
+  );
+  return rows.map((r) => ({
+    sourceAgent: r.source_agent,
+    detector: r.detector,
+    open: r.open,
+    touchedSince: r.touched,
+    sampleTitle: r.sample ?? "",
+  }));
+}

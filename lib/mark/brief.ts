@@ -32,6 +32,7 @@ import {
 } from "../hermes-findings";
 import type { IngestedFinding, SpecialistRunStatus } from "../generated/prisma";
 import { dismissUrl, withoutSuppressed } from "./dismiss";
+import { renderSystemCheck, runSystemCheck, type SystemCheck } from "./health";
 
 export type BriefType = "daily" | "recon-ar" | "restricted" | "weekly" | "monthly";
 
@@ -152,6 +153,18 @@ async function buildBriefInner(briefType: BriefType, dryRun: boolean): Promise<B
   // agent — "we didn't check" — so they get lifted out of the item list and
   // reported alongside agent health instead of buried mid-brief.
   const detectorBlindSpots = summariseDetectorFailures(openFindings, now);
+
+  // Did the agents actually run this morning? Daily brief only; a failure to
+  // run the check is itself reported, never silently skipped.
+  let systemCheck: SystemCheck | null = null;
+  if (briefType === "daily") {
+    systemCheck = await runSystemCheck(now).catch((e) => ({
+      ok: false,
+      problems: [`The system check itself failed: ${e instanceof Error ? e.message : String(e)}`],
+      notes: [],
+      window: null,
+    }));
+  }
 
   // AR collections policy (Tony, 2026-07-04): 61-90d invoices are the working
   // bucket — always top priority, they only get paid if we chase. An invoice
@@ -350,6 +363,7 @@ async function buildBriefInner(briefType: BriefType, dryRun: boolean): Promise<B
       staleAgents,
       detectorBlindSpots,
       restrictedTotalSummary: isRestricted ? null : restrictedTotal,
+      systemCheck,
     });
     return {
       briefId: "(dry-run)",
@@ -422,7 +436,12 @@ async function buildBriefInner(briefType: BriefType, dryRun: boolean): Promise<B
   }
 
   // ── Deliver via SES with the channel guard. ──
-  const { channel, to, subject } = routing(briefType, synthesis.headline);
+  const routed = routing(briefType, synthesis.headline);
+  const { channel, to } = routed;
+  // A failed system check is flagged where it can't be missed: the subject.
+  const subject = systemCheck && !systemCheck.ok
+    ? `⚠ SYSTEM CHECK FAILED — ${routed.subject}`.slice(0, 250)
+    : routed.subject;
   const bodyText = renderEmailBody({
     headline: synthesis.headline,
     narrative: synthesis.narrative,
@@ -434,6 +453,7 @@ async function buildBriefInner(briefType: BriefType, dryRun: boolean): Promise<B
     staleAgents,
     detectorBlindSpots,
     restrictedTotalSummary: isRestricted ? null : restrictedTotal,
+    systemCheck,
   });
 
   let delivered = false;
@@ -942,6 +962,8 @@ interface RenderEmailBodyArgs {
   detectorBlindSpots: DetectorBlindSpot[];
   /** When set, append a one-liner reference (non-restricted briefs only). */
   restrictedTotalSummary: number | null;
+  /** Daily brief only — rendered first. */
+  systemCheck?: SystemCheck | null;
 }
 
 /** Amounts only earn a slot when they carry information. A finding with a
@@ -970,6 +992,11 @@ function renderEmailBody(a: RenderEmailBodyArgs): string {
   lines.push(a.narrative);
   lines.push("");
   lines.push("─────────────────────────────────────────────");
+
+  if (a.systemCheck) {
+    lines.push(...renderSystemCheck(a.systemCheck));
+    lines.push("");
+  }
 
   // Coverage first. What Mark could NOT check outranks anything he did.
   const coverageLines: string[] = [];
