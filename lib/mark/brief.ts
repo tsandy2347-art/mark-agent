@@ -31,6 +31,7 @@ import {
   type HermesFinding,
 } from "../hermes-findings";
 import type { IngestedFinding, SpecialistRunStatus } from "../generated/prisma";
+import { dismissUrl, withoutSuppressed } from "./dismiss";
 
 export type BriefType = "daily" | "recon-ar" | "restricted" | "weekly" | "monthly";
 
@@ -394,8 +395,13 @@ async function buildBriefInner(briefType: BriefType, dryRun: boolean): Promise<B
     },
   });
 
+  // Each emailed line links to its own CorrelatedIssue for the dismiss page.
+  // No links on the restricted brief (people / pay — never on a page reachable
+  // without login) or on AR policy roll-ups (one line standing for dozens of
+  // invoices; those clear when the invoices are paid).
+  const linkFor = new Map<(typeof displayItems)[number], string>();
   for (const c of displayItems) {
-    await prisma.correlatedIssue.create({
+    const issue = await prisma.correlatedIssue.create({
       data: {
         briefId: brief.id,
         title: c.title,
@@ -409,6 +415,10 @@ async function buildBriefInner(briefType: BriefType, dryRun: boolean): Promise<B
         amount: c.amount == null ? null : (c.amount as unknown as number),
       },
     });
+    if (!isRestricted && !c.policyTag && !c.isRestricted) {
+      const url = dismissUrl(issue.id);
+      if (url) linkFor.set(c, url);
+    }
   }
 
   // ── Deliver via SES with the channel guard. ──
@@ -420,7 +430,7 @@ async function buildBriefInner(briefType: BriefType, dryRun: boolean): Promise<B
     cashByEntity,
     gstByEntity: briefType === "recon-ar" ? null : gstByEntity,
     goalMetrics: scopedMetrics,
-    items: displayItems,
+    items: displayItems.map((c) => ({ ...c, dismissUrl: linkFor.get(c) ?? null })),
     staleAgents,
     detectorBlindSpots,
     restrictedTotalSummary: isRestricted ? null : restrictedTotal,
@@ -864,13 +874,17 @@ export async function fetchOpenFindings(): Promise<IngestedFinding[]> {
       seen.add(r.id);
       merged.push(r);
     }
-    return merged.map(hermesToFinding);
+    // Anything a recipient dismissed or snoozed from a brief link stays out,
+    // even when a detector has re-raised it since (see lib/mark/dismiss.ts).
+    return withoutSuppressed(merged.map(hermesToFinding));
   }
-  return prisma.ingestedFinding.findMany({
-    where: { resolved: false },
-    orderBy: [{ severity: "asc" }, { at: "desc" }],
-    take: 1500,
-  });
+  return withoutSuppressed(
+    await prisma.ingestedFinding.findMany({
+      where: { resolved: false },
+      orderBy: [{ severity: "asc" }, { at: "desc" }],
+      take: 1500,
+    }),
+  );
 }
 
 /** Shape a shared-DB finding like the legacy IngestedFinding rows the
@@ -921,6 +935,8 @@ interface RenderEmailBodyArgs {
     firstRaised: string;
     lastSeen: string;
     policyTag?: "priority-61-90" | "crept-past-90" | "backlog-90-plus";
+    /** Signed link to the Done / Wrong / Snooze page; absent on dry runs. */
+    dismissUrl?: string | null;
   }>;
   staleAgents: Array<{ agent: string; status: string; lastRunAt: string; error: string | null }>;
   detectorBlindSpots: DetectorBlindSpot[];
@@ -1020,6 +1036,7 @@ function renderEmailBody(a: RenderEmailBodyArgs): string {
         `  • [${it.entityCode}] ${tidyTitle(it.title)}${amountSuffix(it.amount)}${conflict}${crept}${unconfirmed}`,
       );
       lines.push(`      from: ${it.sourceAgents.join(", ")}`);
+      if (it.dismissUrl) lines.push(`      done / wrong / snooze: ${it.dismissUrl}`);
     }
     lines.push("");
   }
@@ -1029,6 +1046,7 @@ function renderEmailBody(a: RenderEmailBodyArgs): string {
       const aged = it.ageDays > 7 ? ` (open since ${it.firstRaised})` : "";
       const unconfirmed = it.freshDays > 2 ? ` (last confirmed ${it.lastSeen})` : "";
       lines.push(`  • [${it.entityCode}] ${tidyTitle(it.title)}${amountSuffix(it.amount)}${aged}${unconfirmed}`);
+      if (it.dismissUrl) lines.push(`      done / wrong / snooze: ${it.dismissUrl}`);
     }
     lines.push("");
   }
@@ -1037,6 +1055,7 @@ function renderEmailBody(a: RenderEmailBodyArgs): string {
     for (const it of notes.slice(0, 12)) {
       const aged = it.ageDays > 7 ? ` (open since ${it.firstRaised})` : "";
       lines.push(`  • [${it.entityCode}] ${tidyTitle(it.title)}${aged}`);
+      if (it.dismissUrl) lines.push(`      done / wrong / snooze: ${it.dismissUrl}`);
     }
     if (notes.length > 12) lines.push(`  ... ${notes.length - 12} more`);
     lines.push("");

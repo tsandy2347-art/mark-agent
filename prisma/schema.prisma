@@ -385,3 +385,42 @@ model XeroTenantToken {
   @@unique([xeroApp, tenantId])
   @@index([xeroApp])
 }
+
+/**
+ * A human's answer to a brief item, so it stops coming back.
+ *
+ * Detectors re-raise anything still inside their look-back window, and an
+ * event finding (unvetted payment, new supplier, duplicate) has no rule that
+ * ever closes it — so before this, every false positive returned every
+ * morning and only an env-var allowlist could silence one. A row here is
+ * keyed on the finding's stable identity (evidence.dedupKey, or
+ * agent:entity:title), so a re-raised copy matches and stays out of the brief.
+ *
+ *   scope "finding"  → this exact item (identity).
+ *   scope "supplier" → every finding from `detectors` for this supplier in
+ *                      this entity ("not a care supplier — don't vet").
+ *                      Offered only for vetting checks, never for bank-detail
+ *                      changes, duplicates or ABN problems.
+ *
+ * `until` null = permanent; set = snooze. Mark's own record — the specialist's
+ * finding is resolved in the shared DB only for done / wrong.
+ */
+model FindingSuppression {
+  id          String    @id @default(cuid())
+  scope       String    // "finding" | "supplier"
+  action      String    // "done" | "wrong" | "snooze" | "not-care-supplier"
+  identity    String?   // scope=finding
+  supplierKey String?   // scope=supplier — normalised supplier name
+  detectors   Json?     // scope=supplier — detectors it applies to
+  entityCode  String
+  title       String    // snapshot of what was dismissed, for the audit trail
+  findingIds  Json      // [findingId, ...] at the time of the click
+  issueId     String?   // the CorrelatedIssue (brief line) clicked from
+  until       DateTime?
+  note        String?
+  createdBy   String    @default("brief-link")
+  createdAt   DateTime  @default(now())
+
+  @@index([scope, identity])
+  @@index([scope, supplierKey])
+}

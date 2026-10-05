@@ -1,4 +1,4 @@
-// Read-only client for the hermes-jbc Postgres — the shared `findings` +
+// Client for the hermes-jbc Postgres — the shared `findings` +
 // `audit_runs` tables every Hermes finance skill writes to.
 //
 // Lazy-initialised pg pool. If HERMES_FINDINGS_DATABASE_URL is blank we
@@ -403,4 +403,69 @@ export async function summariseByAgent(): Promise<HermesAgentSummary[]> {
     lastFindingAt: r.last_finding_at ?? null,
     everWroteFindings: r.ever_wrote ?? 0,
   }));
+}
+
+/** The one write Mark makes to the shared findings DB, and only on a human's
+ *  say-so: a recipient tapped Done or Wrong on a brief line. Marks those rows
+ *  resolved with who/why so the specialist's own record shows the answer
+ *  (resolved_by 'brief:done' / 'brief:wrong'). Already-resolved rows are left
+ *  alone. Returns the number of rows closed. */
+export async function resolveFindingsByHuman(args: {
+  ids: string[];
+  action: "done" | "wrong";
+  note: string;
+}): Promise<number> {
+  if (!hermesConfigured() || args.ids.length === 0) return 0;
+  const { rowCount } = await pool().query(
+    `UPDATE findings
+        SET resolved = true,
+            resolved_by = $2,
+            resolved_at = now(),
+            resolution_note = $3
+      WHERE id = ANY($1) AND resolved = false`,
+    [args.ids, `brief:${args.action}`, args.note],
+  );
+  return rowCount ?? 0;
+}
+
+/** Findings by id, open or not — for the dismiss page. */
+export async function getFindingsByIds(ids: string[]): Promise<HermesFinding[]> {
+  if (!hermesConfigured() || ids.length === 0) return [];
+  const { rows } = await pool().query(
+    `SELECT id, source_agent, run_id, detector, domain, severity, entity_code,
+            is_people_flag, title, detail, amount, ai_explanation, resolved,
+            created_at, evidence
+       FROM findings
+      WHERE id = ANY($1)`,
+    [ids],
+  );
+  return rows.map((r) => ({
+    id: r.id,
+    sourceAgent: r.source_agent,
+    runId: r.run_id,
+    detector: r.detector,
+    domain: r.domain,
+    severity: r.severity,
+    entityCode: r.entity_code,
+    isPeopleFlag: r.is_people_flag,
+    title: r.title,
+    detail: r.detail,
+    amount: r.amount !== null ? Number(r.amount) : null,
+    aiExplanation: r.ai_explanation,
+    resolved: r.resolved,
+    createdAt: r.created_at,
+    evidence: r.evidence ?? null,
+  }));
+}
+
+/** Undo for resolveFindingsByHuman — reopens only rows a brief link closed. */
+export async function reopenFindingsClosedByBrief(ids: string[]): Promise<number> {
+  if (!hermesConfigured() || ids.length === 0) return 0;
+  const { rowCount } = await pool().query(
+    `UPDATE findings
+        SET resolved = false, resolved_by = NULL, resolved_at = NULL, resolution_note = NULL
+      WHERE id = ANY($1) AND resolved_by LIKE 'brief:%'`,
+    [ids],
+  );
+  return rowCount ?? 0;
 }
