@@ -3,7 +3,7 @@
 // refresh doesn't resubmit.
 
 import { NextResponse, type NextRequest } from "next/server";
-import { verifyDismissToken, type DismissAction } from "@/lib/mark/dismiss";
+import { publicBaseUrl, verifyDismissToken, type DismissAction } from "@/lib/mark/dismiss";
 import { applyDismiss } from "@/lib/mark/dismiss-actions";
 
 export const dynamic = "force-dynamic";
@@ -12,7 +12,10 @@ const ACTIONS = new Set<DismissAction | "undo">(["done", "wrong", "snooze", "not
 
 export async function POST(req: NextRequest, ctx: { params: Promise<{ token: string }> }) {
   const { token } = await ctx.params;
-  const back = new URL(`/f/${token}`, req.nextUrl.origin);
+  // Behind Railway's proxy req.nextUrl.origin is the container's own
+  // http://localhost:8080 — redirecting there broke the page after every
+  // click. Send people back to the public address.
+  const back = new URL(`/f/${token}`, publicBaseUrl() || req.nextUrl.origin);
   const issueId = verifyDismissToken(token);
   if (!issueId) return new NextResponse("Invalid link", { status: 404 });
 
