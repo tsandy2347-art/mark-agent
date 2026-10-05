@@ -122,7 +122,7 @@ export default async function DismissPage(ctx: {
           </button>
           {vettingSupplier && (
             <button name="action" value="not-care-supplier" style={btn}>
-              ⊘ {vettingSupplier} isn&apos;t a care supplier — never vet
+              {`⊘ ${vettingSupplier} isn't a care supplier — never vet`}
             </button>
           )}
           <input
